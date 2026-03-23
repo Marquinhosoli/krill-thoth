@@ -262,29 +262,31 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
 
 
 def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame) -> bytes:
+
     def make_df(df):
-        items = sorted(df.index.tolist()) if not df.empty else []
-        return pd.DataFrame(
-            {"CODIGO": [""] * len(items), "PRODUTO": items, "PRECO": [""] * len(items)}
-        )
+        if df.empty:
+            return pd.DataFrame(columns=["CODIGO", "PRODUTO", "PRECO"])
+
+        # ordena alfabeticamente
+      produtos = sorted(df.index.tolist(), key=lambda x: norm_key(x)))
+
+        # cria estrutura
+        tabela = pd.DataFrame({
+            "CODIGO": [""] * len(produtos),
+            "PRODUTO": produtos,
+            "PRECO": [""] * len(produtos),
+        })
+
+        return tabela
+
+    frutas_df = make_df(frutas)
+    legumes_df = make_df(legumes)
 
     out = BytesIO()
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        make_df(frutas).to_excel(writer, sheet_name="FRUTAS", index=False)
-        make_df(legumes).to_excel(writer, sheet_name="LEGUMES", index=False)
-    out.seek(0)
-    return out.getvalue()
+        frutas_df.to_excel(writer, sheet_name="FRUTAS", index=False)
+        legumes_df.to_excel(writer, sheet_name="LEGUMES", index=False)
 
-
-def build_unknown(unknown: pd.DataFrame) -> bytes:
-    out = BytesIO()
-    df = (
-        pd.DataFrame({"PRODUTO": sorted(unknown.index.tolist())})
-        if not unknown.empty
-        else pd.DataFrame(columns=["PRODUTO"])
-    )
-    with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name="NAO_ENCONTRADOS", index=False)
     out.seek(0)
     return out.getvalue()
 
