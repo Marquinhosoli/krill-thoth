@@ -275,6 +275,21 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame) -> bytes:
             "PRODUTO": produtos,
             "PRECO": [""] * len(produtos),
         })
+        def build_unknown(unknown: pd.DataFrame) -> bytes:
+    out = BytesIO()
+
+    if not unknown.empty:
+        df = pd.DataFrame({
+            "PRODUTO": sorted(unknown.index.tolist(), key=lambda x: norm_key(x))
+        })
+    else:
+        df = pd.DataFrame(columns=["PRODUTO"])
+
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="NAO_ENCONTRADOS", index=False)
+
+    out.seek(0)
+    return out.getvalue()
 
         return tabela
 
