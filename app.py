@@ -267,10 +267,9 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame) -> bytes:
         if df.empty:
             return pd.DataFrame(columns=["CODIGO", "PRODUTO", "PRECO"])
 
-        # ordena alfabeticamente
-      produtos = sorted(df.index.tolist(), key=lambda x: norm_key(x)))
+        # ordena alfabeticamente (seguro)
+        produtos = sorted(df.index.tolist(), key=lambda x: norm_key(x))
 
-        # cria estrutura
         tabela = pd.DataFrame({
             "CODIGO": [""] * len(produtos),
             "PRODUTO": produtos,
