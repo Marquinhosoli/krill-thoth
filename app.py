@@ -72,23 +72,18 @@ def parse_price_series(series: pd.Series) -> pd.Series:
         return pd.to_numeric(series, errors="coerce")
 
     s = series.astype(str).str.strip()
-    s = s.replace({"": None, "nan": None, "None": None, "<NA>": None})
+    s = s.replace({"": None, "nan": None, "None": None})
 
     def convert(v):
         if v is None or pd.isna(v):
             return None
-        # Limpa qualquer R$ ou espaço
-        txt = str(v).strip().replace("R$", "").replace("r$", "").strip()
+        txt = str(v).strip()
 
-        if txt in ["", "nan", "<NA>", "None"]:
+        if txt == "":
             return None
 
-        # Arruma formatações com ponto e vírgula
         if "," in txt and "." in txt:
-            if txt.rfind(",") > txt.rfind("."):
-                txt = txt.replace(".", "").replace(",", ".")
-            else:
-                txt = txt.replace(",", "")
+            txt = txt.replace(".", "").replace(",", ".")
         elif "," in txt:
             txt = txt.replace(",", ".")
 
@@ -105,96 +100,69 @@ def read_order(file):
     raw = pd.read_excel(file_buffer, header=None)
     
     header_row = find_header_row(raw)
-
-    row_vals = raw.iloc[header_row].tolist()
-    new_cols = []
-    seen = {}
-    for c in row_vals:
-        base_c = norm_key(c)
-        if base_c == "":
-            base_c = "VAZIO"
-        if base_c in seen:
-            seen[base_c] += 1
-            new_cols.append(f"{base_c}_{seen[base_c]}")
-        else:
-            seen[base_c] = 0
-            new_cols.append(base_c)
-
-    df = raw.iloc[header_row + 1:].copy()
-    df.columns = new_cols
-
-    def get_exact_col(possibilities):
-        for p in possibilities:
-            k = norm_key(p)
-            if k in df.columns:
-                return df[k], k
-        raise ValueError(f"Coluna obrigatória não encontrada. Procurado: {possibilities}")
-
-    col_loja_s, debug_loja = get_exact_col(["LOJA"])
-    col_produto_s, debug_produto = get_exact_col(["DESCRIÇÃO DO PRODUTO", "DESCRICAO DO PRODUTO", "PRODUTO"])
-    col_qtde_s, debug_qtde = get_exact_col(["QTDE.", "QTDE", "QUANTIDADE"])
-
-    # NOVO: Função super blindada que rejeita colunas bloqueadas
-    def extract_coalesced(keyword_groups, exclude_words=[]):
-        for group in keyword_groups:
-            matching_cols = []
-            for col in df.columns:
-                base_col = re.sub(r'_\d+$', '', col).strip()
-                if all(word in base_col for word in group):
-                    # Garante que a coluna não contém as palavras bloqueadas (ex: "CX")
-                    if not any(ex in base_col for ex in exclude_words):
-                        matching_cols.append(col)
-            
-            if matching_cols:
-                temp_df = df[matching_cols].copy()
-                for c in temp_df.columns:
-                    temp_df[c] = temp_df[c].apply(
-                        lambda x: pd.NA if pd.isna(x) or str(x).strip() in ['', 'nan', 'None', '<NA>'] else x
-                    )
-                # Puxa o dado esteja ele em qual coluna mesclada estiver
-                s = temp_df.bfill(axis=1).ffill(axis=1).iloc[:, 0]
-                return s, re.sub(r'_\d+$', '', matching_cols[0])
-                
-        return None, "NÃO ENCONTRADA"
-
-    # Procurando Código
-    col_codigo_s, debug_codigo = extract_coalesced(
-        [["GTIN"], ["PLU"], ["EAN"], ["BARRA"], ["REF", "FORNECEDOR"], ["CODIGO"], ["CÓDIGO"], ["COD"], ["CÓD"], ["ITEM"], ["SKU"]],
-        exclude_words=["DESCRIÇÃO", "NOME"]
-    )
     
-    # Procurando Preço: PROÍBE TERMINANTEMENTE LER A CAIXA OU TOTAL
-    col_preco_s, debug_preco = extract_coalesced(
-        [
-            ["CUSTO", "UN"], ["PRECO", "UN"], ["VALOR", "UN"],
-            ["UNITARIO"], ["UNITÁRIO"], ["UNIT"], 
-            ["CUSTO"], ["PRECO"], ["PREÇO"], ["VALOR"], ["VLR"]
-        ],
-        exclude_words=["CX", "CAIXA", "TOTAL", "SUBTOTAL", "BRUTO", "DESC", "FRETE", "IMPOSTO", "IPI", "ICMS"]
-    )
+    # Extrai a linha do cabeçalho
+    row_vals = raw.iloc[header_row].tolist()
+    norm_row = [norm_key(x) for x in row_vals]
+    
+    # Funções blindadas para caçar o ÍNDICE (posição) da coluna, e não o nome
+    def find_idx(possibilities):
+        for p in possibilities:
+            key = norm_key(p)
+            for i, val in enumerate(norm_row):
+                if key == val:
+                    return i
+        return None
+        
+    def find_idx_by_keyword(keyword_groups):
+        for i, val in enumerate(norm_row):
+            for group in keyword_groups:
+                if all(word in val for word in group):
+                    return i
+        return None
 
+    # Mapeamento exato da posição de cada coluna
+    idx_loja = find_idx(["Loja"])
+    idx_produto = find_idx(["Descrição do Produto", "Descricao do Produto", "Produto"])
+    idx_qtde = find_idx(["Qtde.", "Qtde", "Quantidade"])
+    
+    idx_codigo = find_idx_by_keyword([["CODIGO"], ["CÓDIGO"], ["COD"], ["CÓD"], ["ITEM"], ["SKU"], ["EAN"], ["GTIN"], ["BARRA"]])
+    idx_preco = find_idx_by_keyword([["PRECO"], ["PREÇO"], ["VALOR"], ["VLR"], ["UNITARIO"], ["UNITÁRIO"], ["UNIT"], ["CUSTO"]])
+    
+    if idx_loja is None or idx_produto is None or idx_qtde is None:
+        raise ValueError("Erro fatal: As colunas obrigatórias (Loja, Produto, Qtde) desapareceram ou estão vazias no arquivo.")
+
+    # Pega apenas os dados abaixo do cabeçalho
+    df_raw = raw.iloc[header_row + 1:].copy()
+    
+    # Monta um novo DataFrame limpo buscando os dados diretamente pela posição
     clean_df = pd.DataFrame()
-    clean_df["Loja"] = col_loja_s
-    clean_df["Descrição do Produto"] = col_produto_s
-    clean_df["Qtde."] = col_qtde_s
-
-    if col_codigo_s is not None:
-        clean_df["CodigoPedido"] = col_codigo_s
+    clean_df["Loja"] = df_raw.iloc[:, idx_loja].copy()
+    clean_df["Descrição do Produto"] = df_raw.iloc[:, idx_produto].copy()
+    clean_df["Qtde."] = df_raw.iloc[:, idx_qtde].copy()
+    
+    if idx_codigo is not None:
+        clean_df["CodigoPedido"] = df_raw.iloc[:, idx_codigo].copy()
     else:
         clean_df["CodigoPedido"] = ""
-
-    if col_preco_s is not None:
-        clean_df["PrecoPedido"] = col_preco_s
+        
+    if idx_preco is not None:
+        clean_df["PrecoPedido"] = df_raw.iloc[:, idx_preco].copy()
     else:
         clean_df["PrecoPedido"] = None
 
+    # Aplica formatação e normalização nos dados extraídos
     clean_df["Loja"] = clean_df["Loja"].map(norm_text)
     clean_df["Descrição do Produto"] = clean_df["Descrição do Produto"].map(norm_text)
     clean_df["Qtde."] = pd.to_numeric(clean_df["Qtde."], errors="coerce").fillna(0)
     
-    clean_df["CodigoPedido"] = clean_df["CodigoPedido"].map(lambda x: norm_text(x) if pd.notna(x) else "")
-    clean_df["PrecoPedido"] = parse_price_series(clean_df["PrecoPedido"])
+    if idx_codigo is not None:
+        clean_df["CodigoPedido"] = clean_df["CodigoPedido"].map(norm_text)
+        
+    if idx_preco is not None:
+        clean_df["PrecoPedido"] = parse_price_series(clean_df["PrecoPedido"])
 
+    # Filtros finais
     clean_df = clean_df[clean_df["Descrição do Produto"] != ""]
     clean_df = clean_df[~clean_df["Descrição do Produto"].map(norm_key).isin(IGNORE_NAMES)]
     clean_df = clean_df[clean_df["Loja"].str.fullmatch(r"\d+")]
@@ -205,11 +173,11 @@ def read_order(file):
         raise ValueError("Nenhum item válido foi encontrado no pedido.")
 
     debug_info = {
-        "col_loja": debug_loja,
-        "col_produto": debug_produto,
-        "col_qtde": debug_qtde,
-        "col_codigo": debug_codigo,
-        "col_preco": debug_preco,
+        "col_loja": str(row_vals[idx_loja]),
+        "col_produto": str(row_vals[idx_produto]),
+        "col_qtde": str(row_vals[idx_qtde]),
+        "col_codigo": str(row_vals[idx_codigo]) if idx_codigo is not None else "NÃO ENCONTRADA",
+        "col_preco": str(row_vals[idx_preco]) if idx_preco is not None else "NÃO ENCONTRADA",
     }
 
     return clean_df, debug_info
@@ -406,19 +374,19 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
 
 
 def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataFrame) -> bytes:
-    base_precos = order_df[["Descrição do Produto", "CodigoPedido", "PrecoPedido"]].copy()
-    
-    base_precos["CodigoPedido"] = base_precos["CodigoPedido"].replace({"": pd.NA})
-    base_precos["PrecoPedido"] = base_precos["PrecoPedido"].replace({"": pd.NA})
-    
-    base_precos = base_precos.sort_values(by=["PrecoPedido", "CodigoPedido"], na_position="last")
-    base_precos = base_precos.drop_duplicates(subset=["Descrição do Produto"])
+    base_precos = (
+        order_df[["Descrição do Produto", "CodigoPedido", "PrecoPedido"]]
+        .copy()
+        .drop_duplicates(subset=["Descrição do Produto"])
+    )
+
     base_precos["PRODUTO_KEY"] = base_precos["Descrição do Produto"].map(norm_key)
 
     def make_df(df):
         if df.empty:
             return pd.DataFrame(columns=["CÓDIGO", "PRODUTO", "PREÇO"])
 
+        # Garante a ordem alfabética de A-Z
         produtos = sorted(df.index.tolist(), key=lambda x: str(x).strip().upper())
         linhas = []
 
@@ -430,9 +398,9 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataF
                 row = achou.iloc[0]
                 linhas.append(
                     {
-                        "CÓDIGO": row["CodigoPedido"] if pd.notna(row["CodigoPedido"]) else "",
+                        "CÓDIGO": row["CodigoPedido"],
                         "PRODUTO": prod,
-                        "PREÇO": row["PrecoPedido"] if pd.notna(row["PrecoPedido"]) else "",
+                        "PREÇO": row["PrecoPedido"],
                     }
                 )
             else:
@@ -454,6 +422,7 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataF
         frutas_df.to_excel(writer, sheet_name="FRUTAS", index=False)
         legumes_df.to_excel(writer, sheet_name="LEGUMES", index=False)
         
+        # Deixa a planilha de preços formatada (largura das colunas)
         for sheet_name in ["FRUTAS", "LEGUMES"]:
             worksheet = writer.sheets[sheet_name]
             worksheet.column_dimensions['A'].width = 12
