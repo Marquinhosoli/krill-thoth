@@ -82,43 +82,36 @@ def read_order(file):
     row_vals = raw.iloc[header_row].tolist()
     norm_row = [norm_key(x) for x in row_vals]
     
-    # ======= NOVA BUSCA POR PRIORIDADE ========
-    # Essa função força o sistema a procurar as palavras EXATAS na ordem da nossa lista.
-    # Assim ele NUNCA vai pegar o "Valor Total" no lugar do "Preço Unitário".
-    def find_idx_by_priority(keyword_groups):
-        for group in keyword_groups:
+    # ======= BUSCA BLINDADA ========
+    # Agora ele procura a coluna certa, mas foge de palavras proibidas (como EAN e TOTAL)
+    def find_idx(keywords_list, avoid_list=[]):
+        for keywords in keywords_list:
             for i, val in enumerate(norm_row):
-                if all(word in val for word in group):
-                    # Se achar "TOTAL" na coluna, ele pula fora (não queremos valor total)
-                    if "TOTAL" in val and "TOTAL" not in group:
+                if all(kw in val for kw in keywords):
+                    if any(avoid in val for avoid in avoid_list):
                         continue
                     return i
         return None
 
-    idx_loja = find_idx_by_priority([["LOJA"]])
-    idx_produto = find_idx_by_priority([["DESCRIÇÃO DO PRODUTO"], ["DESCRICAO DO PRODUTO"], ["PRODUTO"]])
-    idx_qtde = find_idx_by_priority([["QTDE."], ["QTDE"], ["QUANTIDADE"]])
+    idx_loja = find_idx([["LOJA"]])
+    idx_produto = find_idx([["DESCRIÇÃO DO PRODUTO"], ["DESCRICAO DO PRODUTO"], ["PRODUTO"]], avoid_list=["REF", "CODIGO"])
+    idx_qtde = find_idx([["QTDE.", "PEDIDA"], ["QTDE", "PEDIDA"], ["QTDE."], ["QTDE"], ["QUANTIDADE"]])
     
-    idx_codigo = find_idx_by_priority([
-        ["REF", "FORN"], 
-        ["REFERENCIA", "FORN"], 
-        ["REFERÊNCIA", "FORN"], 
-        ["REF"], 
-        ["REFERENCIA"], 
-        ["COD", "FORN"], 
-        ["CÓDIGO", "FORN"]
-    ])
+    # Busca pela "Ref do Fornecedor" (1 a 4 números) - Bloqueia o EAN
+    idx_codigo = find_idx([
+        ["REF", "FORN"], ["REFERENCIA", "FORN"], ["REFERÊNCIA", "FORN"], 
+        ["REF"], ["REFERENCIA"], ["CODIGO", "FORN"]
+    ], avoid_list=["BARRAS", "EAN", "GTIN", "SKU"])
     
-    # Ordem rigorosa: Custo/Unitário primeiro, genéricos depois.
-    idx_preco = find_idx_by_priority([
-        ["PRECO", "UNIT"], ["PREÇO", "UNIT"],
-        ["VALOR", "UNIT"], ["VLR", "UNIT"],
-        ["UNITARIO"], ["UNITÁRIO"], ["UNIT"],
-        ["PRECO", "CUSTO"], ["PREÇO", "CUSTO"],
-        ["CUSTO"],
-        ["PRECO"], ["PREÇO"],
-        ["VALOR"], ["VLR"]
-    ])
+    # Busca pelo Preço - Bloqueia TOTAL e EAN
+    idx_preco = find_idx([
+        ["PRECO", "UNIT"], ["PREÇO", "UNIT"], ["VALOR", "UNIT"], ["VLR", "UNIT"],
+        ["CUSTO", "UNIT"], ["CUSTO"], ["PRECO"], ["PREÇO"]
+    ], avoid_list=["TOTAL", "BARRAS", "EAN", "GTIN", "VENDA"])
+    
+    if idx_preco is None:
+        # Tenta só valor caso não ache preço
+        idx_preco = find_idx([["VALOR"], ["VLR"]], avoid_list=["TOTAL", "BARRAS", "EAN", "GTIN", "VENDA"])
     
     if idx_loja is None or idx_produto is None or idx_qtde is None:
         raise ValueError("Erro fatal: As colunas obrigatórias (Loja, Produto, Qtde) desapareceram.")
@@ -160,11 +153,11 @@ def read_order(file):
         raise ValueError("Nenhum item válido foi encontrado no pedido.")
 
     debug_info = {
-        "col_loja": str(row_vals[idx_loja]),
-        "col_produto": str(row_vals[idx_produto]),
-        "col_qtde": str(row_vals[idx_qtde]),
-        "col_codigo": str(row_vals[idx_codigo]) if idx_codigo is not None else "NÃO ENCONTRADA",
-        "col_preco": str(row_vals[idx_preco]) if idx_preco is not None else "NÃO ENCONTRADA",
+        "col_loja": str(row_vals[idx_loja]) if idx_loja is not None else "ERRO",
+        "col_produto": str(row_vals[idx_produto]) if idx_produto is not None else "ERRO",
+        "col_qtde": str(row_vals[idx_qtde]) if idx_qtde is not None else "ERRO",
+        "col_codigo": str(row_vals[idx_codigo]) if idx_codigo is not None else "NÃO ACHOU COLUNA REF",
+        "col_preco": str(row_vals[idx_preco]) if idx_preco is not None else "NÃO ACHOU COLUNA PREÇO",
     }
     return clean_df, debug_info
 
@@ -222,18 +215,6 @@ def get_cached_product_rows(model_path_str: str):
     wb = load_workbook(model_path_str)
     return product_rows(wb.active)
 
-@st.cache_data
-def get_model_codes(model_path_str: str):
-    wb = load_workbook(model_path_str)
-    ws = wb.active
-    codes = {}
-    for row in range(3, ws.max_row + 1):
-        prod = norm_text(ws.cell(row, 2).value)
-        cod = norm_text(ws.cell(row, 1).value)
-        if prod and norm_key(prod) not in IGNORE_NAMES:
-            codes[norm_key(prod)] = cod
-    return codes
-
 def copy_row_style(ws, src_row, dst_row):
     for col in range(1, ws.max_column + 1):
         src = ws.cell(src_row, col)
@@ -270,9 +251,8 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
     cols_to_clear = list(stores.values())
     if total_col: cols_to_clear.append(total_col)
     if cd_col: cols_to_clear.append(cd_col)
-    
     for row in range(3, ws.max_row + 1):
-        if norm_text(ws.cell(row, 2).value):
+        if norm_text(ws.cell(row, 1).value):
             for col in cols_to_clear: ws.cell(row, col).value = None
 
     used = set()
@@ -298,7 +278,7 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
         current_row = last_filled + 1
         for prod in missing:
             copy_row_style(ws, style_row, current_row)
-            ws.cell(current_row, 2).value = prod
+            ws.cell(current_row, 1).value = prod
             row_total = 0
             for loja in data.columns:
                 if loja in stores:
@@ -315,11 +295,11 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
     out.seek(0)
     return out.getvalue()
 
-def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataFrame, frutas_codes: dict, legumes_codes: dict) -> bytes:
-    base_precos = order_df[['Descrição do Produto', 'PrecoPedido']].copy().drop_duplicates(subset=['Descrição do Produto'])
+def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataFrame) -> bytes:
+    base_precos = order_df[['Descrição do Produto', 'CodigoPedido', 'PrecoPedido']].copy().drop_duplicates(subset=['Descrição do Produto'])
     base_precos['PRODUTO_KEY'] = base_precos['Descrição do Produto'].map(norm_key)
 
-    def make_df(df, model_codes):
+    def make_df(df):
         if df.empty:
             return pd.DataFrame(columns=['CODIGO', 'PRODUTO', 'PRECO'])
             
@@ -328,21 +308,34 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataF
         for prod in produtos:
             key = norm_key(prod)
             achou = base_precos[base_precos['PRODUTO_KEY'] == key]
-            codigo_interno = model_codes.get(key, "")
             
             if not achou.empty:
                 row = achou.iloc[0]
+                cod = str(row['CodigoPedido']).strip()
+                
+                # Garante que só pega os números do código, ignorando letras, EAN ou lixo
+                if cod and cod.lower() != 'nan' and cod.lower() != 'none':
+                    cod_num = "".join(filter(str.isdigit, cod))
+                    # Limita a 4 dígitos para ter certeza absoluta que não é um EAN gigante que vazou
+                    if len(cod_num) > 6:
+                        cod_formatado = ""
+                    else:
+                        cod_formatado = f"'{cod_num}" if cod_num else ""
+                else:
+                    cod_formatado = ""
+
                 linhas.append({
-                    'CODIGO': codigo_interno, 
+                    'CODIGO': cod_formatado, 
                     'PRODUTO': prod, 
                     'PRECO': row['PrecoPedido']
                 })
             else:
-                linhas.append({'CODIGO': codigo_interno, 'PRODUTO': prod, 'PRECO': ''})
+                linhas.append({'CODIGO': '', 'PRODUTO': prod, 'PRECO': ''})
+                
         return pd.DataFrame(linhas)
 
-    frutas_df = make_df(frutas, frutas_codes)
-    legumes_df = make_df(legumes, legumes_codes)
+    frutas_df = make_df(frutas)
+    legumes_df = make_df(legumes)
     
     out = BytesIO()
     with pd.ExcelWriter(out, engine='openpyxl') as writer:
@@ -400,19 +393,17 @@ if st.button("PROCESSAR", use_container_width=True, type="primary"):
 
             frutas_rows = get_cached_product_rows(str(MODEL_FRUTAS))
             legumes_rows = get_cached_product_rows(str(MODEL_LEGUMES))
-            
-            frutas_codes = get_model_codes(str(MODEL_FRUTAS))
-            legumes_codes = get_model_codes(str(MODEL_LEGUMES))
 
             frutas_df, legumes_df, unknown_df = split_by_models(pivot, frutas_rows, legumes_rows)
 
             frutas_file = write_output(MODEL_FRUTAS, frutas_df)
             legumes_file = write_output(MODEL_LEGUMES, legumes_df)
-            prices_file = build_prices(frutas_df, legumes_df, order_df, frutas_codes, legumes_codes)
+            prices_file = build_prices(frutas_df, legumes_df, order_df)
             unknown_file = build_unknown(unknown_df)
 
             st.success("Processamento concluído com sucesso.")
 
+            # Isso aqui vai imprimir na tela QUAIS colunas ele pescou. Assim a gente tem certeza absoluta do que ele fez!
             st.caption(
                 f"Colunas encontradas no pedido → "
                 f"Loja: {debug_info['col_loja']} | "
