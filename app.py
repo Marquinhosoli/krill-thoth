@@ -77,16 +77,18 @@ def parse_price_series(series: pd.Series) -> pd.Series:
     def convert(v):
         if v is None or pd.isna(v):
             return None
-        txt = str(v).strip()
+        # Limpa qualquer R$ ou espaço
+        txt = str(v).strip().replace("R$", "").replace("r$", "").strip()
 
-        if txt in ["", "nan", "<NA>"]:
+        if txt in ["", "nan", "<NA>", "None"]:
             return None
 
-        # Limpa símbolo de moeda caso exista
-        txt = txt.replace("R$", "").replace("r$", "").strip()
-
+        # Arruma formatações com ponto e vírgula
         if "," in txt and "." in txt:
-            txt = txt.replace(".", "").replace(",", ".")
+            if txt.rfind(",") > txt.rfind("."):
+                txt = txt.replace(".", "").replace(",", ".")
+            else:
+                txt = txt.replace(",", "")
         elif "," in txt:
             txt = txt.replace(",", ".")
 
@@ -104,7 +106,6 @@ def read_order(file):
     
     header_row = find_header_row(raw)
 
-    # Resolve o problema de células mescladas e nomes repetidos
     row_vals = raw.iloc[header_row].tolist()
     new_cols = []
     seen = {}
@@ -133,7 +134,6 @@ def read_order(file):
     col_produto_s, debug_produto = get_exact_col(["DESCRIÇÃO DO PRODUTO", "DESCRICAO DO PRODUTO", "PRODUTO"])
     col_qtde_s, debug_qtde = get_exact_col(["QTDE.", "QTDE", "QUANTIDADE"])
 
-    # Função Mágica que junta células mescladas
     def extract_coalesced(keyword_groups):
         for group in keyword_groups:
             matching_cols = []
@@ -148,14 +148,22 @@ def read_order(file):
                     temp_df[c] = temp_df[c].apply(
                         lambda x: pd.NA if pd.isna(x) or str(x).strip() in ['', 'nan', 'None', '<NA>'] else x
                     )
-                # Junta todas as colunas que foram mescladas preenchendo os buracos
-                s = temp_df.bfill(axis=1).iloc[:, 0]
+                # Puxa o dado esteja ele em qual coluna mesclada estiver
+                s = temp_df.bfill(axis=1).ffill(axis=1).iloc[:, 0]
                 return s, re.sub(r'_\d+$', '', matching_cols[0])
                 
         return None, "NÃO ENCONTRADA"
 
-    col_codigo_s, debug_codigo = extract_coalesced([["CODIGO"], ["CÓDIGO"], ["COD"], ["CÓD"], ["ITEM"], ["SKU"], ["EAN"], ["GTIN"], ["BARRA"]])
-    col_preco_s, debug_preco = extract_coalesced([["PRECO"], ["PREÇO"], ["VALOR"], ["VLR"], ["UNITARIO"], ["UNITÁRIO"], ["UNIT"], ["CUSTO"]])
+    # Procurando pelo nome exato que a Krill usa
+    col_codigo_s, debug_codigo = extract_coalesced([
+        ["REF", "FORNECEDOR"], ["GTIN"], ["PLU"], 
+        ["CODIGO"], ["CÓDIGO"], ["COD"], ["CÓD"], ["ITEM"], ["SKU"], ["EAN"], ["BARRA"]
+    ])
+    
+    col_preco_s, debug_preco = extract_coalesced([
+        ["CUSTO", "UN"], ["CUSTO", "CX"], 
+        ["PRECO"], ["PREÇO"], ["VALOR"], ["VLR"], ["UNITARIO"], ["UNITÁRIO"], ["UNIT"], ["CUSTO"]
+    ])
 
     clean_df = pd.DataFrame()
     clean_df["Loja"] = col_loja_s
@@ -172,7 +180,6 @@ def read_order(file):
     else:
         clean_df["PrecoPedido"] = None
 
-    # Limpeza e Formatação Final
     clean_df["Loja"] = clean_df["Loja"].map(norm_text)
     clean_df["Descrição do Produto"] = clean_df["Descrição do Produto"].map(norm_text)
     clean_df["Qtde."] = pd.to_numeric(clean_df["Qtde."], errors="coerce").fillna(0)
@@ -180,7 +187,6 @@ def read_order(file):
     clean_df["CodigoPedido"] = clean_df["CodigoPedido"].map(lambda x: norm_text(x) if pd.notna(x) else "")
     clean_df["PrecoPedido"] = parse_price_series(clean_df["PrecoPedido"])
 
-    # Filtros
     clean_df = clean_df[clean_df["Descrição do Produto"] != ""]
     clean_df = clean_df[~clean_df["Descrição do Produto"].map(norm_key).isin(IGNORE_NAMES)]
     clean_df = clean_df[clean_df["Loja"].str.fullmatch(r"\d+")]
@@ -392,19 +398,23 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
 
 
 def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataFrame) -> bytes:
-    base_precos = (
-        order_df[["Descrição do Produto", "CodigoPedido", "PrecoPedido"]]
-        .copy()
-        .drop_duplicates(subset=["Descrição do Produto"])
-    )
-
+    base_precos = order_df[["Descrição do Produto", "CodigoPedido", "PrecoPedido"]].copy()
+    
+    # A MÁGICA: Protegemos as linhas que possuem preço para elas não serem deletadas por engano
+    base_precos["CodigoPedido"] = base_precos["CodigoPedido"].replace({"": pd.NA})
+    base_precos["PrecoPedido"] = base_precos["PrecoPedido"].replace({"": pd.NA})
+    
+    # Ordena jogando as linhas sem dados pro final
+    base_precos = base_precos.sort_values(by=["PrecoPedido", "CodigoPedido"], na_position="last")
+    
+    # Agora sim, agrupa removendo as linhas vazias e mantendo as "ricas"
+    base_precos = base_precos.drop_duplicates(subset=["Descrição do Produto"])
     base_precos["PRODUTO_KEY"] = base_precos["Descrição do Produto"].map(norm_key)
 
     def make_df(df):
         if df.empty:
             return pd.DataFrame(columns=["CÓDIGO", "PRODUTO", "PREÇO"])
 
-        # Garante a ordem alfabética de A-Z
         produtos = sorted(df.index.tolist(), key=lambda x: str(x).strip().upper())
         linhas = []
 
@@ -416,9 +426,9 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataF
                 row = achou.iloc[0]
                 linhas.append(
                     {
-                        "CÓDIGO": row["CodigoPedido"],
+                        "CÓDIGO": row["CodigoPedido"] if pd.notna(row["CodigoPedido"]) else "",
                         "PRODUTO": prod,
-                        "PREÇO": row["PrecoPedido"],
+                        "PREÇO": row["PrecoPedido"] if pd.notna(row["PrecoPedido"]) else "",
                     }
                 )
             else:
@@ -440,7 +450,6 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataF
         frutas_df.to_excel(writer, sheet_name="FRUTAS", index=False)
         legumes_df.to_excel(writer, sheet_name="LEGUMES", index=False)
         
-        # Deixa a planilha de preços formatada (largura das colunas)
         for sheet_name in ["FRUTAS", "LEGUMES"]:
             worksheet = writer.sheets[sheet_name]
             worksheet.column_dimensions['A'].width = 12
