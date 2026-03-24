@@ -114,7 +114,6 @@ def parse_price_series(series: pd.Series) -> pd.Series:
 
 
 def read_order(file):
-    # Proteção: transforma o arquivo do Streamlit explicitamente em Bytes puro para o Pandas
     file_buffer = BytesIO(file.getvalue())
     raw = pd.read_excel(file_buffer, header=None)
     
@@ -128,14 +127,15 @@ def read_order(file):
     col_produto = find_required_column(df, ["Descrição do Produto", "Descricao do Produto", "Produto"])
     col_qtde = find_required_column(df, ["Qtde.", "Qtde", "Quantidade"])
 
+    # NOVO: Radar muito mais forte para encontrar as colunas de Código e Preço
     col_codigo = find_optional_column_by_keywords(
         df,
-        [["COD"], ["CÓD"], ["CODIGO"], ["CÓDIGO"], ["ITEM"], ["SKU"]],
+        [["CODIGO"], ["CÓDIGO"], ["COD"], ["CÓD"], ["ITEM"], ["SKU"], ["EAN"], ["GTIN"], ["BARRA"]],
     )
 
     col_preco = find_optional_column_by_keywords(
         df,
-        [["PRECO"], ["PREÇO"], ["VALOR"], ["UNITARIO"], ["UNITÁRIO"], ["PRECO", "VENDA"], ["PREÇO", "VENDA"]],
+        [["PRECO"], ["PREÇO"], ["VALOR"], ["VLR"], ["UNITARIO"], ["UNITÁRIO"], ["UNIT"], ["CUSTO"]],
     )
 
     cols = [col_loja, col_produto, col_qtde]
@@ -310,7 +310,6 @@ def split_by_models(pivot, frutas_rows, legumes_rows):
 
 
 def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
-    # Garantia de transformar o caminho em string antes do openpyxl ler
     wb = load_workbook(str(model_path))
     ws = wb.active
 
