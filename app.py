@@ -374,63 +374,42 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
 
 
 def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataFrame) -> bytes:
-    base_precos = (
-        order_df[["Descrição do Produto", "CodigoPedido", "PrecoPedido"]]
-        .copy()
-        .drop_duplicates(subset=["Descrição do Produto"])
-    )
+    base_precos = order_df[['Descrição do Produto', 'CodigoPedido', 'PrecoPedido']].copy().drop_duplicates(subset=['Descrição do Produto'])
+    base_precos['PRODUTO_KEY'] = base_precos['Descrição do Produto'].map(norm_key)
 
-    base_precos["PRODUTO_KEY"] = base_precos["Descrição do Produto"].map(norm_key)
-
-    def make_df(df):
+    linhas_txt = []
+    
+    def extrair_linhas(df):
         if df.empty:
-            return pd.DataFrame(columns=["CÓDIGO", "PRODUTO", "PREÇO"])
-
-        # Garante a ordem alfabética de A-Z
+            return
         produtos = sorted(df.index.tolist(), key=lambda x: str(x).strip().upper())
-        linhas = []
-
         for prod in produtos:
             key = norm_key(prod)
-            achou = base_precos[base_precos["PRODUTO_KEY"] == key]
-
+            achou = base_precos[base_precos['PRODUTO_KEY'] == key]
+            
             if not achou.empty:
                 row = achou.iloc[0]
-                linhas.append(
-                    {
-                        "CÓDIGO": row["CodigoPedido"],
-                        "PRODUTO": prod,
-                        "PREÇO": row["PrecoPedido"],
-                    }
-                )
-            else:
-                linhas.append(
-                    {
-                        "CÓDIGO": "",
-                        "PRODUTO": prod,
-                        "PREÇO": "",
-                    }
-                )
+                codigo = str(row['CodigoPedido']).strip()
+                preco = row['PrecoPedido']
+                
+                cod_numeros = "".join(filter(str.isdigit, codigo))
+                
+                if not cod_numeros or pd.isna(preco):
+                    continue
+                
+                try:
+                    preco_cents = int(round(float(preco) * 100))
+                    cod_formatado = cod_numeros.zfill(10)
+                    preco_formatado = str(preco_cents).zfill(10)
+                    linhas_txt.append(f"{cod_formatado}{preco_formatado}")
+                except Exception:
+                    continue
 
-        return pd.DataFrame(linhas)
-
-    frutas_df = make_df(frutas)
-    legumes_df = make_df(legumes)
-
-    out = BytesIO()
-    with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        frutas_df.to_excel(writer, sheet_name="FRUTAS", index=False)
-        legumes_df.to_excel(writer, sheet_name="LEGUMES", index=False)
-        
-        # Deixa a planilha de preços formatada (largura das colunas)
-        for sheet_name in ["FRUTAS", "LEGUMES"]:
-            worksheet = writer.sheets[sheet_name]
-            worksheet.column_dimensions['A'].width = 12
-            worksheet.column_dimensions['B'].width = 45
-            worksheet.column_dimensions['C'].width = 15
-
-    out.seek(0)
-    return out.getvalue()
+    extrair_linhas(frutas)
+    extrair_linhas(legumes)
+    
+    linhas_unicas = list(dict.fromkeys(linhas_txt))
+    return "\n".join(linhas_unicas).encode('utf-8')
 
 
 def build_unknown(unknown: pd.DataFrame) -> bytes:
@@ -532,8 +511,8 @@ if st.button("PROCESSAR", use_container_width=True, type="primary"):
                 st.download_button(
                     "Baixar PREÇOS",
                     prices_file,
-                    "KRILL_PRECOS.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "KRILL_PRECOS.txt",
+                    mime="text/plain",
                     use_container_width=True,
                 )
 
