@@ -120,14 +120,26 @@ def read_order(file):
     header_row = find_header_row(raw)
 
     df = raw.iloc[header_row + 1:].copy()
-    df.columns = raw.iloc[header_row]
-    df.columns = [norm_text(c) for c in df.columns]
+    
+    # --- CORREÇÃO: Remove colunas duplicadas que fazem o Excel dar curto-circuito ---
+    new_cols = []
+    seen = set()
+    for c in raw.iloc[header_row]:
+        base_c = norm_text(c)
+        c_str = base_c
+        counter = 1
+        while c_str in seen:
+            c_str = f"{base_c}_{counter}"
+            counter += 1
+        seen.add(c_str)
+        new_cols.append(c_str)
+        
+    df.columns = new_cols
 
     col_loja = find_required_column(df, ["Loja"])
     col_produto = find_required_column(df, ["Descrição do Produto", "Descricao do Produto", "Produto"])
     col_qtde = find_required_column(df, ["Qtde.", "Qtde", "Quantidade"])
 
-    # NOVO: Radar muito mais forte para encontrar as colunas de Código e Preço
     col_codigo = find_optional_column_by_keywords(
         df,
         [["CODIGO"], ["CÓDIGO"], ["COD"], ["CÓD"], ["ITEM"], ["SKU"], ["EAN"], ["GTIN"], ["BARRA"]],
