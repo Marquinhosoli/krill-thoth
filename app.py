@@ -38,8 +38,8 @@ def resolve_model_path(filename: str) -> Path:
     return BASE_DIR / filename
 
 
-MODEL_FRUTAS = resolve_model_path("KRILL_FRUTAS_Branco (1).xlsx")
-MODEL_LEGUMES = resolve_model_path("KRILL_LEGUMES_Branco (1).xlsx")
+MODEL_FRUTAS = resolve_model_path("KRILL_FRUTAS_Branco.xlsx")
+MODEL_LEGUMES = resolve_model_path("KRILL_LEGUMES_Branco.xlsx")
 
 
 def find_header_row(raw: pd.DataFrame) -> int:
@@ -73,7 +73,9 @@ def find_required_column(df: pd.DataFrame, possibilities: list[str]):
         key = norm_key(name)
         if key in normalized:
             return normalized[key]
-    raise ValueError(f"Coluna obrigatória não encontrada. Procurei por: {', '.join(possibilities)}")
+    raise ValueError(
+        f"Coluna obrigatória não encontrada. Procurei por: {', '.join(possibilities)}"
+    )
 
 
 def find_optional_column_by_keywords(df: pd.DataFrame, keyword_groups: list[list[str]]):
@@ -85,59 +87,31 @@ def find_optional_column_by_keywords(df: pd.DataFrame, keyword_groups: list[list
     return None
 
 
-def parse_price_series(series: pd.Series) -> pd.Series:
-    if pd.api.types.is_numeric_dtype(series):
-        return pd.to_numeric(series, errors="coerce")
+def parse_price_series(series):
+    if isinstance(series, pd.DataFrame):
+        series = series.bfill(axis=1).iloc[:, 0]
 
     s = series.astype(str).str.strip()
-    s = s.replace({"": None, "nan": None, "None": None})
-
-    def convert(v):
-        if v is None or pd.isna(v):
-            return None
-        txt = str(v).strip()
-
-        if txt == "":
-            return None
-
-        if "," in txt and "." in txt:
-            txt = txt.replace(".", "").replace(",", ".")
-        elif "," in txt:
-            txt = txt.replace(",", ".")
-
-        try:
-            return float(txt)
-        except Exception:
-            return None
-
-    return s.map(convert)
+    s = s.str.replace(".", "", regex=False)
+    s = s.str.replace(",", ".", regex=False)
+    s = s.str.replace(r"[^\d\.-]", "", regex=True)
+    return pd.to_numeric(s, errors="coerce").fillna(0)
 
 
 def read_order(file):
     file_buffer = BytesIO(file.getvalue())
     raw = pd.read_excel(file_buffer, header=None)
-    
+
     header_row = find_header_row(raw)
 
     df = raw.iloc[header_row + 1:].copy()
-    
-    # --- CORREÇÃO: Remove colunas duplicadas que fazem o Excel dar curto-circuito ---
-    new_cols = []
-    seen = set()
-    for c in raw.iloc[header_row]:
-        base_c = norm_text(c)
-        c_str = base_c
-        counter = 1
-        while c_str in seen:
-            c_str = f"{base_c}_{counter}"
-            counter += 1
-        seen.add(c_str)
-        new_cols.append(c_str)
-        
-    df.columns = new_cols
+    df.columns = raw.iloc[header_row]
+    df.columns = [norm_text(c) for c in df.columns]
 
     col_loja = find_required_column(df, ["Loja"])
-    col_produto = find_required_column(df, ["Descrição do Produto", "Descricao do Produto", "Produto"])
+    col_produto = find_required_column(
+        df, ["Descrição do Produto", "Descricao do Produto", "Produto"]
+    )
     col_qtde = find_required_column(df, ["Qtde.", "Qtde", "Quantidade"])
 
     col_codigo = find_optional_column_by_keywords(
@@ -163,13 +137,16 @@ def read_order(file):
     df[col_qtde] = pd.to_numeric(df[col_qtde], errors="coerce").fillna(0)
 
     if col_codigo:
+        if isinstance(df[col_codigo], pd.DataFrame):
+            df[col_codigo] = df[col_codigo].bfill(axis=1).iloc[:, 0]
         df[col_codigo] = df[col_codigo].map(norm_text)
     else:
         df["__CODIGO__"] = ""
         col_codigo = "__CODIGO__"
 
     if col_preco:
-        df[col_preco] = parse_price_series(df[col_preco])
+        col_preco_data = df[col_preco]
+        df[col_preco] = parse_price_series(col_preco_data)
     else:
         df["__PRECO__"] = None
         col_preco = "__PRECO__"
@@ -329,8 +306,10 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
     prod_map = product_rows(ws)
 
     cols_to_clear = list(stores.values())
-    if total_col: cols_to_clear.append(total_col)
-    if cd_col: cols_to_clear.append(cd_col)
+    if total_col:
+        cols_to_clear.append(total_col)
+    if cd_col:
+        cols_to_clear.append(cd_col)
 
     for row in range(3, ws.max_row + 1):
         if norm_text(ws.cell(row, 1).value):
@@ -407,7 +386,6 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataF
         if df.empty:
             return pd.DataFrame(columns=["CÓDIGO", "PRODUTO", "PREÇO"])
 
-        # Garante a ordem alfabética de A-Z
         produtos = sorted(df.index.tolist(), key=lambda x: str(x).strip().upper())
         linhas = []
 
@@ -442,13 +420,12 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataF
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
         frutas_df.to_excel(writer, sheet_name="FRUTAS", index=False)
         legumes_df.to_excel(writer, sheet_name="LEGUMES", index=False)
-        
-        # Deixa a planilha de preços formatada (largura das colunas)
+
         for sheet_name in ["FRUTAS", "LEGUMES"]:
             worksheet = writer.sheets[sheet_name]
-            worksheet.column_dimensions['A'].width = 12
-            worksheet.column_dimensions['B'].width = 45
-            worksheet.column_dimensions['C'].width = 15
+            worksheet.column_dimensions["A"].width = 12
+            worksheet.column_dimensions["B"].width = 45
+            worksheet.column_dimensions["C"].width = 15
 
     out.seek(0)
     return out.getvalue()
@@ -493,11 +470,15 @@ if st.button("PROCESSAR", use_container_width=True, type="primary"):
     else:
         try:
             if not MODEL_FRUTAS.exists():
-                st.error(f"Modelo FRUTAS não encontrado: {MODEL_FRUTAS.name}. Verifique se o arquivo está na pasta.")
+                st.error(
+                    f"Modelo FRUTAS não encontrado: {MODEL_FRUTAS.name}. Verifique se o arquivo está na pasta."
+                )
                 st.stop()
 
             if not MODEL_LEGUMES.exists():
-                st.error(f"Modelo LEGUMES não encontrado: {MODEL_LEGUMES.name}. Verifique se o arquivo está na pasta.")
+                st.error(
+                    f"Modelo LEGUMES não encontrado: {MODEL_LEGUMES.name}. Verifique se o arquivo está na pasta."
+                )
                 st.stop()
 
             order_df, debug_info = read_order(uploaded)
