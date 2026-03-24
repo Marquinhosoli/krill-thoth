@@ -47,8 +47,8 @@ def resolve_model_path(filename: str) -> Path:
     )
 
 
-MODEL_FRUTAS = resolve_model_path("modelo_frutas.xlsx")
-MODEL_LEGUMES = resolve_model_path("modelo_legumes.xlsx")
+MODEL_FRUTAS = resolve_model_path("KRILL_FRUTAS_Branco (1).xlsx")
+MODEL_LEGUMES = resolve_model_path("KRILL_LEGUMES_Branco (1).xlsx")
 
 
 def find_header_row(raw: pd.DataFrame) -> int:
