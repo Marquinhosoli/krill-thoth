@@ -1,318 +1,160 @@
-/* =========================
-   KRILL PRO - EXPORTAÇÃO COMPLETA
-   Gera:
-   1) planilha principal FRUTAS
-   2) planilha principal LEGUMES
-   3) planilha CODIGOS_E_PRECOS_FRUTAS
-   4) planilha CODIGOS_E_PRECOS_LEGUMES
-   ========================= */
+import pandas as pd
+from io import BytesIO
+import re
+import unicodedata
 
-function normalizarTexto(txt) {
-  return String(txt || "")
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toUpperCase();
-}
+def normalizar_texto(txt):
+    txt = "" if txt is None else str(txt)
+    txt = unicodedata.normalize("NFD", txt)
+    txt = "".join(c for c in txt if unicodedata.category(c) != "Mn")
+    txt = re.sub(r"\s+", " ", txt).strip().upper()
+    return txt
 
-function paraNumero(valor) {
-  if (typeof valor === "number") return valor;
-  if (valor == null) return 0;
-  const limpo = String(valor)
-    .replace(/\./g, "")
-    .replace(",", ".")
-    .replace(/[^\d.-]/g, "");
-  const n = parseFloat(limpo);
-  return isNaN(n) ? 0 : n;
-}
+def para_numero(valor):
+    if pd.isna(valor):
+        return 0.0
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    s = str(valor).strip()
+    s = s.replace(".", "").replace(",", ".")
+    s = re.sub(r"[^\d\.-]", "", s)
+    try:
+        return float(s)
+    except:
+        return 0.0
 
-function moedaBR(valor) {
-  return Number(paraNumero(valor) || 0);
-}
+def extrair_numero_loja(loja):
+    m = re.search(r"(\d+)", str(loja))
+    return int(m.group(1)) if m else None
 
-function extrairNumeroLoja(loja) {
-  const m = String(loja || "").match(/(\d+)/);
-  return m ? parseInt(m[1], 10) : null;
-}
+def nome_coluna_krill(numero):
+    return f"KRILL {numero}"
 
-function ordenarColunasKrill(colunas) {
-  return [...new Set(colunas)]
-    .filter(v => v != null)
-    .sort((a, b) => extrairNumeroLoja(a) - extrairNumeroLoja(b));
-}
+def detectar_coluna(df, candidatos):
+    mapa = {normalizar_texto(c): c for c in df.columns}
+    for cand in candidatos:
+        n = normalizar_texto(cand)
+        if n in mapa:
+            return mapa[n]
+    return None
 
-function nomeColunaKrill(numero) {
-  return `KRILL ${numero}`;
-}
+def classificar_categoria(nome_produto, frutas_modelo, legumes_modelo):
+    nome_norm = normalizar_texto(nome_produto)
 
-function obterNomeProdutoPedido(item) {
-  return (
-    item.produto ||
-    item.PRODUTO ||
-    item.descricao ||
-    item.DESCRICAO ||
-    item.item ||
-    item.ITEM ||
-    ""
-  );
-}
+    if nome_norm in frutas_modelo:
+        return "FRUTAS"
+    if nome_norm in legumes_modelo:
+        return "LEGUMES"
 
-function obterCodigoPedido(item) {
-  return (
-    item.codigo ||
-    item.CODIGO ||
-    item.cod ||
-    item.COD ||
-    item["Código"] ||
-    item["CODIGO"] ||
-    ""
-  );
-}
+    chaves_legumes = [
+        "ABOBRINHA","ABOBORA","AIPIM","ALFACE","ALHO","BATATA","BATATA DOCE",
+        "BERINJELA","BETERRABA","BROCOLIS","CEBOLA","CENOURA","CHUCHU","COUVE",
+        "COUVE FLOR","ERVILHA","ESPINAFRE","INHAME","JILO","MANDIOCA",
+        "MANDIOQUINHA","MAXIXE","MILHO","MILHO VERDE","PEPINO","PIMENTA",
+        "PIMENTAO","QUIABO","REPOLHO","RUCULA","SALSINHA","TOMATE","VAGEM"
+    ]
 
-function obterPrecoPedido(item) {
-  return (
-    item.preco ||
-    item.PRECO ||
-    item.valor ||
-    item.VALOR ||
-    item["Preço"] ||
-    item["PREÇO"] ||
-    0
-  );
-}
+    chaves_frutas = [
+        "ABACATE","ABACAXI","ACEROLA","AMEIXA","AMORA","BANANA","CAJU","CAQUI",
+        "CARAMBOLA","COCO","FIGO","FRAMBOESA","GOIABA","KIWI","LARANJA","LIMAO",
+        "MACA","MAMAO","MANGA","MELANCIA","MELAO","MEXERICA","MIRTILO","MORANGO",
+        "NECTARINA","PERA","PESSEGO","PITAYA","ROMA","TANGERINA","UVA"
+    ]
 
-function obterQuantidadePedido(item) {
-  return (
-    paraNumero(item.quantidade) ||
-    paraNumero(item.QUANTIDADE) ||
-    paraNumero(item.qtd) ||
-    paraNumero(item.QTD) ||
-    paraNumero(item.caixas) ||
-    paraNumero(item.CAIXAS) ||
-    0
-  );
-}
+    if any(k in nome_norm for k in chaves_legumes):
+        return "LEGUMES"
+    if any(k in nome_norm for k in chaves_frutas):
+        return "FRUTAS"
 
-function obterLojaPedido(item) {
-  return (
-    item.loja ||
-    item.LOJA ||
-    item.destino ||
-    item.DESTINO ||
-    item["Loja"] ||
-    ""
-  );
-}
+    return "LEGUMES"
 
-function mapearModeloPorNome(modeloLinhas) {
-  const mapa = new Map();
-  for (const linha of modeloLinhas || []) {
-    const nome = linha.PRODUTO || linha.produto || linha.DESCRICAO || linha.descricao || "";
-    if (nome) {
-      mapa.set(normalizarTexto(nome), nome);
-    }
-  }
-  return mapa;
-}
+def gerar_planilha_precos(pedido_df, modelo_frutas_df, modelo_legumes_df):
+    col_produto = detectar_coluna(pedido_df, ["Produto", "Descrição do Produto", "Descricao do Produto", "Item"])
+    col_codigo = detectar_coluna(pedido_df, ["Código", "Codigo", "Cod"])
+    col_preco = detectar_coluna(pedido_df, ["Preço", "Preco", "GTIN/PLU Unitário", "Valor Unitário", "Valor"])
+    col_loja = detectar_coluna(pedido_df, ["Loja", "Loja Destino", "Destino"])
 
-function listaProdutosModelo(modeloLinhas) {
-  return (modeloLinhas || [])
-    .map(l => l.PRODUTO || l.produto || l.DESCRICAO || l.descricao || "")
-    .filter(Boolean);
-}
+    if not col_produto:
+        raise ValueError("Não encontrei a coluna de produto no pedido.")
+    if not col_loja:
+        raise ValueError("Não encontrei a coluna de loja no pedido.")
 
-function detectarCategoriaProduto(nomeProduto, mapaFrutas, mapaLegumes) {
-  const nomeNorm = normalizarTexto(nomeProduto);
+    frutas_modelo = {}
+    legumes_modelo = {}
 
-  if (mapaFrutas.has(nomeNorm)) return "FRUTAS";
-  if (mapaLegumes.has(nomeNorm)) return "LEGUMES";
+    for _, row in modelo_frutas_df.iterrows():
+        nome = str(row.iloc[0]).strip()
+        if nome:
+            frutas_modelo[normalizar_texto(nome)] = nome
 
-  const chavesLegumes = [
-    "ABOBRINHA","ABOBORA","AIPIM","ALFACE","ALHO","BATATA","BATATA DOCE","BATATA LAVADA",
-    "BERINJELA","BETERRABA","BROCOLIS","BROCOLIS NINJA","BROCOLIS RAMOSO","CARA","CEBOLA",
-    "CENOURA","CHUCHU","COUVE","COUVE FLOR","ERVILHA","ERVILHA TORTA","ESPINAFRE","INHAME",
-    "JILO","MANDIOCA","MANDIOQUINHA","MAXIXE","MILHO","MILHO VERDE","PEPINO","PEPINO JAPONES",
-    "PIMENTA","PIMENTAO","QUIABO","REPOLHO","RUCULA","SALSINHA","TOMATE","TOMATE CEREJA",
-    "TOMATE GRAPE","VAGEM"
-  ];
+    for _, row in modelo_legumes_df.iterrows():
+        nome = str(row.iloc[0]).strip()
+        if nome:
+            legumes_modelo[normalizar_texto(nome)] = nome
 
-  const chavesFrutas = [
-    "ABACATE","ABACAXI","ACEROLA","AMEIXA","AMORA","BANANA","CAJU","CAQUI","CARAMBOLA",
-    "CEREJA","COCO","FIGO","FRAMBOESA","GOIABA","JABUTICABA","KIWI","LARANJA","LIMAO",
-    "MACA","MAMAO","MANGA","MELANCIA","MELAO","MEXERICA","MIRTILO","MORANGO","NECTARINA",
-    "PERA","PESSEGO","PITAYA","PITANGA","ROMA","TANGERINA","UVA"
-  ];
+    frutas = {}
+    legumes = {}
 
-  if (chavesLegumes.some(k => nomeNorm.includes(k))) return "LEGUMES";
-  if (chavesFrutas.some(k => nomeNorm.includes(k))) return "FRUTAS";
+    for _, row in pedido_df.iterrows():
+        produto_original = str(row[col_produto]).strip() if pd.notna(row[col_produto]) else ""
+        if not produto_original:
+            continue
 
-  return "LEGUMES";
-}
+        loja = row[col_loja]
+        numero_loja = extrair_numero_loja(loja)
+        if numero_loja is None:
+            continue
 
-function agruparPedidoHorizontal(pedidoItens, modeloFrutas, modeloLegumes) {
-  const mapaFrutas = mapearModeloPorNome(modeloFrutas);
-  const mapaLegumes = mapearModeloPorNome(modeloLegumes);
+        codigo = ""
+        if col_codigo and pd.notna(row[col_codigo]):
+            codigo = str(row[col_codigo]).strip()
 
-  const lojasSet = new Set();
-  const agrupadoFrutas = new Map();
-  const agrupadoLegumes = new Map();
+        preco = 0.0
+        if col_preco and pd.notna(row[col_preco]):
+            preco = para_numero(row[col_preco])
 
-  for (const item of pedidoItens || []) {
-    const produtoOriginal = obterNomeProdutoPedido(item);
-    const codigo = obterCodigoPedido(item);
-    const preco = moedaBR(obterPrecoPedido(item));
-    const qtd = obterQuantidadePedido(item);
-    const lojaBruta = obterLojaPedido(item);
-    const numeroLoja = extrairNumeroLoja(lojaBruta);
+        categoria = classificar_categoria(produto_original, frutas_modelo, legumes_modelo)
+        nome_norm = normalizar_texto(produto_original)
 
-    if (!produtoOriginal || !numeroLoja || !qtd) continue;
+        if categoria == "FRUTAS":
+            nome_final = frutas_modelo.get(nome_norm, produto_original)
+            if nome_final not in frutas:
+                frutas[nome_final] = {
+                    "CODIGO": codigo,
+                    "PRODUTO": nome_final,
+                    "PRECO": preco
+                }
+            else:
+                if not frutas[nome_final]["CODIGO"] and codigo:
+                    frutas[nome_final]["CODIGO"] = codigo
+                if frutas[nome_final]["PRECO"] == 0 and preco:
+                    frutas[nome_final]["PRECO"] = preco
+        else:
+            nome_final = legumes_modelo.get(nome_norm, produto_original)
+            if nome_final not in legumes:
+                legumes[nome_final] = {
+                    "CODIGO": codigo,
+                    "PRODUTO": nome_final,
+                    "PRECO": preco
+                }
+            else:
+                if not legumes[nome_final]["CODIGO"] and codigo:
+                    legumes[nome_final]["CODIGO"] = codigo
+                if legumes[nome_final]["PRECO"] == 0 and preco:
+                    legumes[nome_final]["PRECO"] = preco
 
-    const loja = nomeColunaKrill(numeroLoja);
-    lojasSet.add(loja);
+    df_frutas = pd.DataFrame(list(frutas.values())).sort_values("PRODUTO")
+    df_legumes = pd.DataFrame(list(legumes.values())).sort_values("PRODUTO")
 
-    const categoria = detectarCategoriaProduto(produtoOriginal, mapaFrutas, mapaLegumes);
-    const mapaCategoria = categoria === "FRUTAS" ? agrupadoFrutas : agrupadoLegumes;
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_frutas.to_excel(writer, index=False, sheet_name="FRUTAS")
+        df_legumes.to_excel(writer, index=False, sheet_name="LEGUMES")
 
-    const nomeNorm = normalizarTexto(produtoOriginal);
-    let nomeFinal = produtoOriginal;
+        for aba in ["FRUTAS", "LEGUMES"]:
+            ws = writer.book[aba]
+            for row in ws.iter_rows(min_row=2):
+                row[2].number_format = 'R$ #,##0.00'
 
-    if (categoria === "FRUTAS" && mapaFrutas.has(nomeNorm)) {
-      nomeFinal = mapaFrutas.get(nomeNorm);
-    } else if (categoria === "LEGUMES" && mapaLegumes.has(nomeNorm)) {
-      nomeFinal = mapaLegumes.get(nomeNorm);
-    }
-
-    if (!mapaCategoria.has(nomeFinal)) {
-      mapaCategoria.set(nomeFinal, {
-        PRODUTO: nomeFinal,
-        CODIGO: codigo,
-        PRECO: preco
-      });
-    }
-
-    const linha = mapaCategoria.get(nomeFinal);
-    linha[loja] = (linha[loja] || 0) + qtd;
-
-    if (!linha.CODIGO && codigo) linha.CODIGO = codigo;
-    if ((!linha.PRECO || linha.PRECO === 0) && preco) linha.PRECO = preco;
-  }
-
-  const colunasLojas = ordenarColunasKrill([...lojasSet]);
-
-  function montarLinhasFinais(mapaCategoria, modeloLinhas) {
-    const linhasModelo = listaProdutosModelo(modeloLinhas);
-    const nomesPedido = [...mapaCategoria.keys()];
-    const nomesForaDoModelo = nomesPedido.filter(n => !linhasModelo.some(m => normalizarTexto(m) === normalizarTexto(n)));
-    const ordemFinal = [...linhasModelo, ...nomesForaDoModelo];
-
-    return ordemFinal.map(nome => {
-      const base = { PRODUTO: nome };
-      for (const loja of colunasLojas) base[loja] = 0;
-
-      const registro = [...mapaCategoria.entries()]
-        .find(([k]) => normalizarTexto(k) === normalizarTexto(nome));
-
-      if (registro) {
-        const dados = registro[1];
-        for (const loja of colunasLojas) {
-          base[loja] = dados[loja] || 0;
-        }
-      }
-      return base;
-    });
-  }
-
-  function montarCodigosPrecos(mapaCategoria) {
-    return [...mapaCategoria.values()]
-      .map(item => ({
-        CODIGO: item.CODIGO || "",
-        PRODUTO: item.PRODUTO || "",
-        PRECO: moedaBR(item.PRECO || 0)
-      }))
-      .sort((a, b) => normalizarTexto(a.PRODUTO).localeCompare(normalizarTexto(b.PRODUTO), "pt-BR"));
-  }
-
-  return {
-    colunasLojas,
-    frutas: montarLinhasFinais(agrupadoFrutas, modeloFrutas),
-    legumes: montarLinhasFinais(agrupadoLegumes, modeloLegumes),
-    codigosFrutas: montarCodigosPrecos(agrupadoFrutas),
-    codigosLegumes: montarCodigosPrecos(agrupadoLegumes)
-  };
-}
-
-function ajustarLarguraColunas(ws, larguras) {
-  ws["!cols"] = larguras.map(w => ({ wch: w }));
-}
-
-function aplicarFormatoPreco(ws, dados) {
-  const range = XLSX.utils.decode_range(ws["!ref"]);
-  let colunaPreco = -1;
-
-  for (let c = range.s.c; c <= range.e.c; c++) {
-    const addr = XLSX.utils.encode_cell({ r: 0, c });
-    const cel = ws[addr];
-    if (cel && String(cel.v).toUpperCase() === "PRECO") {
-      colunaPreco = c;
-      break;
-    }
-  }
-
-  if (colunaPreco >= 0) {
-    for (let r = 1; r <= range.e.r; r++) {
-      const addr = XLSX.utils.encode_cell({ r, c: colunaPreco });
-      if (ws[addr]) ws[addr].z = 'R$ #,##0.00';
-    }
-  }
-}
-
-function baixarWorkbook(workbook, nomeArquivo) {
-  XLSX.writeFile(workbook, nomeArquivo);
-}
-
-function exportarKrillProCompleto({
-  pedidoItens,
-  modeloFrutas,
-  modeloLegumes,
-  nomeBase = "KRILL_PRO"
-}) {
-  if (!Array.isArray(pedidoItens) || pedidoItens.length === 0) {
-    throw new Error("Pedido vazio.");
-  }
-
-  const resultado = agruparPedidoHorizontal(pedidoItens, modeloFrutas, modeloLegumes);
-
-  // Workbook principal
-  const wbPrincipal = XLSX.utils.book_new();
-
-  const wsFrutas = XLSX.utils.json_to_sheet(resultado.frutas);
-  const wsLegumes = XLSX.utils.json_to_sheet(resultado.legumes);
-
-  ajustarLarguraColunas(wsFrutas, [42, ...resultado.colunasLojas.map(() => 12)]);
-  ajustarLarguraColunas(wsLegumes, [42, ...resultado.colunasLojas.map(() => 12)]);
-
-  XLSX.utils.book_append_sheet(wbPrincipal, wsFrutas, "FRUTAS");
-  XLSX.utils.book_append_sheet(wbPrincipal, wsLegumes, "LEGUMES");
-
-  baixarWorkbook(wbPrincipal, `${nomeBase}.xlsx`);
-
-  // Workbook códigos e preços
-  const wbCodigos = XLSX.utils.book_new();
-
-  const wsCodFrutas = XLSX.utils.json_to_sheet(resultado.codigosFrutas);
-  const wsCodLegumes = XLSX.utils.json_to_sheet(resultado.codigosLegumes);
-
-  ajustarLarguraColunas(wsCodFrutas, [14, 42, 14]);
-  ajustarLarguraColunas(wsCodLegumes, [14, 42, 14]);
-
-  aplicarFormatoPreco(wsCodFrutas, resultado.codigosFrutas);
-  aplicarFormatoPreco(wsCodLegumes, resultado.codigosLegumes);
-
-  XLSX.utils.book_append_sheet(wbCodigos, wsCodFrutas, "FRUTAS");
-  XLSX.utils.book_append_sheet(wbCodigos, wsCodLegumes, "LEGUMES");
-
-  baixarWorkbook(wbCodigos, `${nomeBase}_CODIGOS_E_PRECOS.xlsx`);
-
-  return resultado;
-}
+    output.seek(0)
+    return output
