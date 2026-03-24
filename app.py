@@ -47,9 +47,37 @@ MODEL_LEGUMES = resolve_model_path("modelo_legumes.xlsx")
 def find_header_row(raw: pd.DataFrame) -> int:
     for i in range(len(raw)):
         row = [norm_text(x) for x in raw.iloc[i].tolist()]
-        if "Loja" in row and "Descrição do Produto" in row and "Qtde." in row:
+        row_keys = [norm_key(x) for x in row]
+
+        has_loja = "LOJA" in row_keys
+        has_produto = (
+            "DESCRIÇÃO DO PRODUTO" in row_keys
+            or "DESCRICAO DO PRODUTO" in row_keys
+            or "PRODUTO" in row_keys
+        )
+        has_qtde = "QTDE." in row_keys or "QTDE" in row_keys or "QUANTIDADE" in row_keys
+
+        if has_loja and has_produto and has_qtde:
             return i
-    raise ValueError("Não encontrei o cabeçalho do pedido (Loja / Descrição do Produto / Qtde.).")
+
+    raise ValueError(
+        "Não encontrei o cabeçalho do pedido. "
+        "É necessário ter as colunas Loja, Descrição do Produto e Qtde."
+    )
+
+
+def find_first_column(df: pd.DataFrame, possibilities: list[str], required: bool = False):
+    normalized = {norm_key(col): col for col in df.columns}
+
+    for name in possibilities:
+        key = norm_key(name)
+        if key in normalized:
+            return normalized[key]
+
+    if required:
+        raise ValueError(f"Coluna obrigatória não encontrada. Procurei por: {', '.join(possibilities)}")
+
+    return None
 
 
 def read_order(file) -> pd.DataFrame:
@@ -59,24 +87,84 @@ def read_order(file) -> pd.DataFrame:
     df = raw.iloc[header_row + 1:].copy()
     df.columns = raw.iloc[header_row]
 
-    required = ["Loja", "Descrição do Produto", "Qtde."]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(f"Colunas obrigatórias ausentes no pedido: {', '.join(missing)}")
+    col_loja = find_first_column(df, ["Loja"], required=True)
+    col_produto = find_first_column(
+        df,
+        ["Descrição do Produto", "Descricao do Produto", "Produto"],
+        required=True,
+    )
+    col_qtde = find_first_column(df, ["Qtde.", "Qtde", "Quantidade"], required=True)
 
-    df = df[required].copy()
-    df["Loja"] = df["Loja"].map(norm_text)
-    df["Descrição do Produto"] = df["Descrição do Produto"].map(norm_text)
-    df["Qtde."] = pd.to_numeric(df["Qtde."], errors="coerce").fillna(0)
+    col_codigo = find_first_column(
+        df,
+        ["Código", "Codigo", "Cód.", "Cod.", "Cod", "Código Produto", "Codigo Produto"],
+        required=False,
+    )
 
-    df = df[df["Descrição do Produto"] != ""]
-    df = df[~df["Descrição do Produto"].map(norm_key).isin(IGNORE_NAMES)]
-    df = df[df["Loja"].str.fullmatch(r"\d+")]
-    df = df[df["Loja"] != "0"]
-    df = df[df["Qtde."] > 0]
+    col_preco = find_first_column(
+        df,
+        [
+            "Preço",
+            "Preco",
+            "Preço Venda",
+            "Preco Venda",
+            "Valor",
+            "Unitário",
+            "Unitario",
+            "Preço Unitário",
+            "Preco Unitario",
+        ],
+        required=False,
+    )
+
+    cols = [col_loja, col_produto, col_qtde]
+    if col_codigo:
+        cols.append(col_codigo)
+    if col_preco:
+        cols.append(col_preco)
+
+    df = df[cols].copy()
+
+    df[col_loja] = df[col_loja].map(norm_text)
+    df[col_produto] = df[col_produto].map(norm_text)
+    df[col_qtde] = pd.to_numeric(df[col_qtde], errors="coerce").fillna(0)
+
+    if col_codigo:
+        df[col_codigo] = df[col_codigo].map(norm_text)
+    else:
+        df["__CODIGO__"] = ""
+        col_codigo = "__CODIGO__"
+
+    if col_preco:
+        preco_series = (
+            df[col_preco]
+            .astype(str)
+            .str.replace(".", "", regex=False)
+            .str.replace(",", ".", regex=False)
+        )
+        df[col_preco] = pd.to_numeric(preco_series, errors="coerce")
+    else:
+        df["__PRECO__"] = None
+        col_preco = "__PRECO__"
+
+    df = df[df[col_produto] != ""]
+    df = df[~df[col_produto].map(norm_key).isin(IGNORE_NAMES)]
+    df = df[df[col_loja].str.fullmatch(r"\d+")]
+    df = df[df[col_loja] != "0"]
+    df = df[df[col_qtde] > 0]
 
     if df.empty:
         raise ValueError("Nenhum item válido foi encontrado no pedido.")
+
+    df = df.rename(
+        columns={
+            col_loja: "Loja",
+            col_produto: "Descrição do Produto",
+            col_qtde: "Qtde.",
+            col_codigo: "CodigoPedido",
+            col_preco: "PrecoPedido",
+        }
+    )
 
     return df
 
@@ -260,20 +348,45 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
     return out.getvalue()
 
 
-def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame) -> bytes:
+def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataFrame) -> bytes:
+    base_precos = (
+        order_df[["Descrição do Produto", "CodigoPedido", "PrecoPedido"]]
+        .copy()
+        .drop_duplicates()
+    )
+
+    base_precos["PRODUTO_KEY"] = base_precos["Descrição do Produto"].map(norm_key)
+
     def make_df(df):
         if df.empty:
             return pd.DataFrame(columns=["CODIGO", "PRODUTO", "PRECO"])
 
         produtos = sorted(df.index.tolist(), key=lambda x: norm_key(x))
+        linhas = []
 
-        return pd.DataFrame(
-            {
-                "CODIGO": [""] * len(produtos),
-                "PRODUTO": produtos,
-                "PRECO": [""] * len(produtos),
-            }
-        )
+        for prod in produtos:
+            key = norm_key(prod)
+            achou = base_precos[base_precos["PRODUTO_KEY"] == key]
+
+            if not achou.empty:
+                row = achou.iloc[0]
+                linhas.append(
+                    {
+                        "CODIGO": row["CodigoPedido"],
+                        "PRODUTO": prod,
+                        "PRECO": row["PrecoPedido"],
+                    }
+                )
+            else:
+                linhas.append(
+                    {
+                        "CODIGO": "",
+                        "PRODUTO": prod,
+                        "PRECO": "",
+                    }
+                )
+
+        return pd.DataFrame(linhas)
 
     frutas_df = make_df(frutas)
     legumes_df = make_df(legumes)
@@ -315,6 +428,7 @@ with st.sidebar:
     st.write("2. Clique em Processar.")
     st.write("3. Baixe FRUTAS, LEGUMES, PREÇOS e NÃO ENCONTRADOS.")
     st.info("O sistema busca os modelos automaticamente na raiz do app ou na pasta models.")
+    st.info("A planilha de PREÇOS usa os códigos e preços do próprio pedido atual.")
     st.info("Regra: pedido loja X = coluna KRILL X.")
 
 uploaded = st.file_uploader("Pedido Krill", type=["xlsx", "xls"])
@@ -347,7 +461,7 @@ if st.button("PROCESSAR", use_container_width=True, type="primary"):
 
             frutas_file = write_output(MODEL_FRUTAS, frutas_df)
             legumes_file = write_output(MODEL_LEGUMES, legumes_df)
-            prices_file = build_prices(frutas_df, legumes_df)
+            prices_file = build_prices(frutas_df, legumes_df, order_df)
             unknown_file = build_unknown(unknown_df)
 
             st.success("Processamento concluído com sucesso.")
