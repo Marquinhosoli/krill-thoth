@@ -100,7 +100,19 @@ def read_order(file):
     idx_loja = find_idx(["Loja"])
     idx_produto = find_idx(["Descrição do Produto", "Descricao do Produto", "Produto"])
     idx_qtde = find_idx(["Qtde.", "Qtde", "Quantidade"])
-    idx_codigo = find_idx_by_keyword([["CODIGO"], ["CÓDIGO"], ["COD"], ["CÓD"], ["ITEM"], ["SKU"], ["EAN"], ["GTIN"], ["BARRA"]])
+    
+    # ======= AQUI ESTÁ O SEGREDO ========
+    # Mandei ele ignorar EAN/Código de Barras e caçar especificamente a "Ref. Fornecedor"
+    idx_codigo = find_idx_by_keyword([
+        ["REF", "FORN"], 
+        ["REFERENCIA", "FORN"], 
+        ["REFERÊNCIA", "FORN"], 
+        ["REF"], 
+        ["REFERENCIA"], 
+        ["COD", "FORN"], 
+        ["CÓDIGO", "FORN"]
+    ])
+    
     idx_preco = find_idx_by_keyword([["PRECO"], ["PREÇO"], ["VALOR"], ["VLR"], ["UNITARIO"], ["UNITÁRIO"], ["UNIT"], ["CUSTO"]])
     
     if idx_loja is None or idx_produto is None or idx_qtde is None:
@@ -127,7 +139,10 @@ def read_order(file):
     clean_df["Qtde."] = pd.to_numeric(clean_df["Qtde."], errors="coerce").fillna(0)
     
     if idx_codigo is not None:
-        clean_df["CodigoPedido"] = clean_df["CodigoPedido"].map(norm_text)
+        # Pega o código e tira aquele ".0" chato que o Excel bota em números
+        clean_df["CodigoPedido"] = clean_df["CodigoPedido"].astype(str).str.replace(".0", "", regex=False).str.strip()
+        clean_df["CodigoPedido"] = clean_df["CodigoPedido"].replace("nan", "")
+
     if idx_preco is not None:
         clean_df["PrecoPedido"] = parse_price_series(clean_df["PrecoPedido"])
 
@@ -283,7 +298,6 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
     out.seek(0)
     return out.getvalue()
 
-# ======= FUNÇÃO DE PREÇOS CORRIGIDA PARA PLANILHA EXCEL ==========
 def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataFrame) -> bytes:
     base_precos = order_df[['Descrição do Produto', 'CodigoPedido', 'PrecoPedido']].copy().drop_duplicates(subset=['Descrição do Produto'])
     base_precos['PRODUTO_KEY'] = base_precos['Descrição do Produto'].map(norm_key)
@@ -291,23 +305,25 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataF
     def make_df(df):
         if df.empty:
             return pd.DataFrame(columns=['CODIGO', 'PRODUTO', 'PRECO'])
+        
+        # Aqui garante que a lista de produtos ficará em ORDEM ALFABÉTICA
         produtos = sorted(df.index.tolist(), key=lambda x: str(x).strip().upper())
         linhas = []
+        
         for prod in produtos:
             key = norm_key(prod)
             achou = base_precos[base_precos['PRODUTO_KEY'] == key]
+            
             if not achou.empty:
                 row = achou.iloc[0]
-                # Adiciona uma aspa simples invisível antes do código para forçar o Excel a reconhecer como Texto e não corromper ("virar código de barras")
-                codigo_formatado = f"'{str(row['CodigoPedido']).strip()}" if pd.notna(row['CodigoPedido']) and str(row['CodigoPedido']).strip() != "" else ""
-                
                 linhas.append({
-                    'CODIGO': codigo_formatado, 
+                    'CODIGO': row['CodigoPedido'], 
                     'PRODUTO': prod, 
                     'PRECO': row['PrecoPedido']
                 })
             else:
                 linhas.append({'CODIGO': '', 'PRODUTO': prod, 'PRECO': ''})
+                
         return pd.DataFrame(linhas)
 
     frutas_df = make_df(frutas)
@@ -318,16 +334,14 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataF
         frutas_df.to_excel(writer, sheet_name='FRUTAS', index=False)
         legumes_df.to_excel(writer, sheet_name='LEGUMES', index=False)
         
-        # Ajusta a largura das colunas para a planilha ficar bonita
         for sheet_name in ['FRUTAS', 'LEGUMES']:
             worksheet = writer.sheets[sheet_name]
-            worksheet.column_dimensions['A'].width = 18 # CODIGO
+            worksheet.column_dimensions['A'].width = 12 # CODIGO
             worksheet.column_dimensions['B'].width = 45 # PRODUTO
             worksheet.column_dimensions['C'].width = 12 # PRECO
             
     out.seek(0)
     return out.getvalue()
-# =================================================================
 
 def build_unknown(unknown: pd.DataFrame) -> bytes:
     out = BytesIO()
@@ -402,7 +416,6 @@ if st.button("PROCESSAR", use_container_width=True, type="primary"):
             with d2:
                 st.download_button("Baixar LEGUMES", legumes_file, "KRILL_LEGUMES_Thoth.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
             with d3:
-                # O BOTÃO VOLTOU PARA .xlsx COMO DEVERIA SER
                 st.download_button("Baixar PREÇOS", prices_file, "KRILL_PRECOS.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
             if not unknown_df.empty:
