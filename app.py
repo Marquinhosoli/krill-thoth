@@ -2,6 +2,7 @@ from io import BytesIO
 from pathlib import Path
 from copy import copy
 import re
+import traceback
 
 import pandas as pd
 import streamlit as st
@@ -34,12 +35,11 @@ def resolve_model_path(filename: str) -> Path:
     for path in candidates:
         if path.exists():
             return path
-    # Se não achar o arquivo, retorna o caminho base em vez de quebrar a tela
     return BASE_DIR / filename
 
 
-MODEL_FRUTAS = resolve_model_path("KRILL_FRUTAS_Branco.xlsx")
-MODEL_LEGUMES = resolve_model_path("KRILL_LEGUMES_Branco.xlsx")
+MODEL_FRUTAS = resolve_model_path("KRILL_FRUTAS_Branco (1).xlsx")
+MODEL_LEGUMES = resolve_model_path("KRILL_LEGUMES_Branco (1).xlsx")
 
 
 def find_header_row(raw: pd.DataFrame) -> int:
@@ -114,7 +114,10 @@ def parse_price_series(series: pd.Series) -> pd.Series:
 
 
 def read_order(file):
-    raw = pd.read_excel(file, header=None)
+    # Proteção: transforma o arquivo do Streamlit explicitamente em Bytes puro para o Pandas
+    file_buffer = BytesIO(file.getvalue())
+    raw = pd.read_excel(file_buffer, header=None)
+    
     header_row = find_header_row(raw)
 
     df = raw.iloc[header_row + 1:].copy()
@@ -267,7 +270,7 @@ def product_rows(ws):
 
 @st.cache_data
 def get_cached_product_rows(model_path_str: str):
-    wb = load_workbook(Path(model_path_str))
+    wb = load_workbook(model_path_str)
     return product_rows(wb.active)
 
 
@@ -307,7 +310,8 @@ def split_by_models(pivot, frutas_rows, legumes_rows):
 
 
 def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
-    wb = load_workbook(model_path)
+    # Garantia de transformar o caminho em string antes do openpyxl ler
+    wb = load_workbook(str(model_path))
     ws = wb.active
 
     stores, total_col, cd_col = model_map(ws)
@@ -554,3 +558,5 @@ if st.button("PROCESSAR", use_container_width=True, type="primary"):
 
         except Exception as e:
             st.error(f"Erro ao processar: {e}")
+            with st.expander("Ver detalhes do erro (Envie isso para suporte)"):
+                st.code(traceback.format_exc())
