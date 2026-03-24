@@ -34,6 +34,13 @@ def resolve_model_path(filename: str) -> Path:
     for path in candidates:
         if path.exists():
             return path
+            
+    # Em vez de quebrar o app (raise FileNotFoundError), 
+    # retorna um caminho padrão. Se não existir, o st.error no botão cuida disso.
+    return BASE_DIR / filename
+    for path in candidates:
+        if path.exists():
+            return path
     raise FileNotFoundError(
         f"Arquivo '{filename}' não encontrado. Procurei em: "
         + " | ".join(str(p) for p in candidates)
