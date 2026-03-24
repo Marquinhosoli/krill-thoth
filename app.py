@@ -22,10 +22,8 @@ def norm_text(v):
         return ""
     return " ".join(t.split())
 
-
 def norm_key(v):
     return re.sub(r"\s+", " ", norm_text(v).upper())
-
 
 def resolve_model_path(filename: str) -> Path:
     candidates = [
@@ -37,35 +35,20 @@ def resolve_model_path(filename: str) -> Path:
             return path
     return BASE_DIR / filename
 
-
 MODEL_FRUTAS = resolve_model_path("KRILL_FRUTAS_Branco (1).xlsx")
 MODEL_LEGUMES = resolve_model_path("KRILL_LEGUMES_Branco (1).xlsx")
-
 
 def find_header_row(raw: pd.DataFrame) -> int:
     for i in range(len(raw)):
         row = [norm_key(x) for x in raw.iloc[i].tolist()]
-
         has_loja = "LOJA" in row
-        has_produto = (
-            "DESCRIÇÃO DO PRODUTO" in row
-            or "DESCRICAO DO PRODUTO" in row
-            or "PRODUTO" in row
-        )
-        has_qtde = (
-            "QTDE." in row
-            or "QTDE" in row
-            or "QUANTIDADE" in row
-        )
+        has_produto = ("DESCRIÇÃO DO PRODUTO" in row or "DESCRICAO DO PRODUTO" in row or "PRODUTO" in row)
+        has_qtde = ("QTDE." in row or "QTDE" in row or "QUANTIDADE" in row)
 
         if has_loja and has_produto and has_qtde:
             return i
 
-    raise ValueError(
-        "Não encontrei o cabeçalho do pedido. "
-        "Precisa existir Loja, Descrição do Produto e Qtde."
-    )
-
+    raise ValueError("Não encontrei o cabeçalho do pedido. Precisa existir Loja, Descrição do Produto e Qtde.")
 
 def parse_price_series(series: pd.Series) -> pd.Series:
     if pd.api.types.is_numeric_dtype(series):
@@ -78,15 +61,12 @@ def parse_price_series(series: pd.Series) -> pd.Series:
         if v is None or pd.isna(v):
             return None
         txt = str(v).strip()
-
         if txt == "":
             return None
-
         if "," in txt and "." in txt:
             txt = txt.replace(".", "").replace(",", ".")
         elif "," in txt:
             txt = txt.replace(",", ".")
-
         try:
             return float(txt)
         except Exception:
@@ -94,18 +74,14 @@ def parse_price_series(series: pd.Series) -> pd.Series:
 
     return s.map(convert)
 
-
 def read_order(file):
     file_buffer = BytesIO(file.getvalue())
     raw = pd.read_excel(file_buffer, header=None)
-    
     header_row = find_header_row(raw)
     
-    # Extrai a linha do cabeçalho
     row_vals = raw.iloc[header_row].tolist()
     norm_row = [norm_key(x) for x in row_vals]
     
-    # Funções blindadas para caçar o ÍNDICE (posição) da coluna, e não o nome
     def find_idx(possibilities):
         for p in possibilities:
             key = norm_key(p)
@@ -121,21 +97,16 @@ def read_order(file):
                     return i
         return None
 
-    # Mapeamento exato da posição de cada coluna
     idx_loja = find_idx(["Loja"])
     idx_produto = find_idx(["Descrição do Produto", "Descricao do Produto", "Produto"])
     idx_qtde = find_idx(["Qtde.", "Qtde", "Quantidade"])
-    
     idx_codigo = find_idx_by_keyword([["CODIGO"], ["CÓDIGO"], ["COD"], ["CÓD"], ["ITEM"], ["SKU"], ["EAN"], ["GTIN"], ["BARRA"]])
     idx_preco = find_idx_by_keyword([["PRECO"], ["PREÇO"], ["VALOR"], ["VLR"], ["UNITARIO"], ["UNITÁRIO"], ["UNIT"], ["CUSTO"]])
     
     if idx_loja is None or idx_produto is None or idx_qtde is None:
-        raise ValueError("Erro fatal: As colunas obrigatórias (Loja, Produto, Qtde) desapareceram ou estão vazias no arquivo.")
+        raise ValueError("Erro fatal: As colunas obrigatórias (Loja, Produto, Qtde) desapareceram.")
 
-    # Pega apenas os dados abaixo do cabeçalho
     df_raw = raw.iloc[header_row + 1:].copy()
-    
-    # Monta um novo DataFrame limpo buscando os dados diretamente pela posição
     clean_df = pd.DataFrame()
     clean_df["Loja"] = df_raw.iloc[:, idx_loja].copy()
     clean_df["Descrição do Produto"] = df_raw.iloc[:, idx_produto].copy()
@@ -151,18 +122,15 @@ def read_order(file):
     else:
         clean_df["PrecoPedido"] = None
 
-    # Aplica formatação e normalização nos dados extraídos
     clean_df["Loja"] = clean_df["Loja"].map(norm_text)
     clean_df["Descrição do Produto"] = clean_df["Descrição do Produto"].map(norm_text)
     clean_df["Qtde."] = pd.to_numeric(clean_df["Qtde."], errors="coerce").fillna(0)
     
     if idx_codigo is not None:
         clean_df["CodigoPedido"] = clean_df["CodigoPedido"].map(norm_text)
-        
     if idx_preco is not None:
         clean_df["PrecoPedido"] = parse_price_series(clean_df["PrecoPedido"])
 
-    # Filtros finais
     clean_df = clean_df[clean_df["Descrição do Produto"] != ""]
     clean_df = clean_df[~clean_df["Descrição do Produto"].map(norm_key).isin(IGNORE_NAMES)]
     clean_df = clean_df[clean_df["Loja"].str.fullmatch(r"\d+")]
@@ -179,76 +147,48 @@ def read_order(file):
         "col_codigo": str(row_vals[idx_codigo]) if idx_codigo is not None else "NÃO ENCONTRADA",
         "col_preco": str(row_vals[idx_preco]) if idx_preco is not None else "NÃO ENCONTRADA",
     }
-
     return clean_df, debug_info
 
-
 def build_pivot(df: pd.DataFrame) -> pd.DataFrame:
-    pivot = df.pivot_table(
-        index="Descrição do Produto",
-        columns="Loja",
-        values="Qtde.",
-        aggfunc="sum",
-        fill_value=0,
-    )
+    pivot = df.pivot_table(index="Descrição do Produto", columns="Loja", values="Qtde.", aggfunc="sum", fill_value=0)
     cols = sorted([str(c) for c in pivot.columns], key=lambda x: int(x))
     pivot.columns = [str(c) for c in pivot.columns]
     return pivot.reindex(cols, axis=1)
 
-
 def extract_store_number(v1, v2):
     c1 = norm_key(v1)
     c2 = norm_key(v2)
-
     for txt in (c1, c2):
         m = re.search(r"\bKRILL\s*(\d+)\b", txt)
-        if m:
-            return m.group(1)
-
+        if m: return m.group(1)
     for txt in (c2, c1):
-        if re.fullmatch(r"\d+", txt):
-            return txt
-
+        if re.fullmatch(r"\d+", txt): return txt
     for txt in (c1, c2):
         numbers = re.findall(r"\d+", txt)
-        if numbers:
-            return numbers[0]
-
+        if numbers: return numbers[0]
     return None
-
 
 def model_map(ws):
     store_to_col = {}
     total_col = None
     cd_col = None
-
     for col in range(2, ws.max_column + 1):
         line1 = ws.cell(1, col).value
         line2 = ws.cell(2, col).value
-
         top = norm_key(line1)
         second = norm_key(line2)
-
         if "TOTAL" in top or "TOTAL" in second:
             total_col = col
             continue
-
         if "CD" in top or "CD" in second:
             cd_col = col
             continue
-
         loja = extract_store_number(line1, line2)
-        if loja:
-            store_to_col[loja] = col
+        if loja: store_to_col[loja] = col
 
     if not store_to_col:
-        raise ValueError(
-            "Não consegui mapear as lojas no modelo. "
-            "Verifique se o cabeçalho contém KRILL X ou número da loja na linha 1 ou 2."
-        )
-
+        raise ValueError("Não consegui mapear as lojas no modelo.")
     return store_to_col, total_col, cd_col
-
 
 def product_rows(ws):
     rows = {}
@@ -258,12 +198,10 @@ def product_rows(ws):
             rows[norm_key(prod)] = row
     return rows
 
-
 @st.cache_data
 def get_cached_product_rows(model_path_str: str):
     wb = load_workbook(model_path_str)
     return product_rows(wb.active)
-
 
 def copy_row_style(ws, src_row, dst_row):
     for col in range(1, ws.max_column + 1):
@@ -277,80 +215,58 @@ def copy_row_style(ws, src_row, dst_row):
         dst.number_format = src.number_format
         dst.protection = copy(src.protection)
 
-
 def split_by_models(pivot, frutas_rows, legumes_rows):
     frutas_idx, legumes_idx, unknown_idx = [], [], []
     frutas_keys = set(frutas_rows.keys())
     legumes_keys = set(legumes_rows.keys())
-
     for prod in pivot.index.tolist():
         key = norm_key(prod)
-        if key in frutas_keys:
-            frutas_idx.append(prod)
-        elif key in legumes_keys:
-            legumes_idx.append(prod)
-        else:
-            unknown_idx.append(prod)
+        if key in frutas_keys: frutas_idx.append(prod)
+        elif key in legumes_keys: legumes_idx.append(prod)
+        else: unknown_idx.append(prod)
 
     empty = pivot.iloc[0:0].copy()
     frutas = pivot.loc[frutas_idx].copy() if frutas_idx else empty.copy()
     legumes = pivot.loc[legumes_idx].copy() if legumes_idx else empty.copy()
     unknown = pivot.loc[unknown_idx].copy() if unknown_idx else empty.copy()
-
     return frutas, legumes, unknown
-
 
 def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
     wb = load_workbook(str(model_path))
     ws = wb.active
-
     stores, total_col, cd_col = model_map(ws)
     prod_map = product_rows(ws)
-
     cols_to_clear = list(stores.values())
     if total_col: cols_to_clear.append(total_col)
     if cd_col: cols_to_clear.append(cd_col)
-
     for row in range(3, ws.max_row + 1):
         if norm_text(ws.cell(row, 1).value):
-            for col in cols_to_clear:
-                ws.cell(row, col).value = None
+            for col in cols_to_clear: ws.cell(row, col).value = None
 
     used = set()
-
     for prod in data.index.tolist():
         key = norm_key(prod)
-        if key not in prod_map:
-            continue
-
+        if key not in prod_map: continue
         row = prod_map[key]
         used.add(key)
         row_total = 0
-
         for loja in data.columns:
             if loja in stores:
                 val = float(data.loc[prod, loja])
                 if val:
                     ws.cell(row, stores[loja]).value = val
                     row_total += val
-
-        if total_col:
-            ws.cell(row, total_col).value = row_total if row_total else None
-
-        if cd_col:
-            ws.cell(row, cd_col).value = None
+        if total_col: ws.cell(row, total_col).value = row_total if row_total else None
+        if cd_col: ws.cell(row, cd_col).value = None
 
     missing = [prod for prod in data.index.tolist() if norm_key(prod) not in used]
-
     if missing:
         last_filled = max(prod_map.values()) if prod_map else 3
         style_row = last_filled
         current_row = last_filled + 1
-
         for prod in missing:
             copy_row_style(ws, style_row, current_row)
             ws.cell(current_row, 1).value = prod
-
             row_total = 0
             for loja in data.columns:
                 if loja in stores:
@@ -358,13 +274,8 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
                     if val:
                         ws.cell(current_row, stores[loja]).value = val
                         row_total += val
-
-            if total_col:
-                ws.cell(current_row, total_col).value = row_total if row_total else None
-
-            if cd_col:
-                ws.cell(current_row, cd_col).value = None
-
+            if total_col: ws.cell(current_row, total_col).value = row_total if row_total else None
+            if cd_col: ws.cell(current_row, cd_col).value = None
             current_row += 1
 
     out = BytesIO()
@@ -372,64 +283,62 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
     out.seek(0)
     return out.getvalue()
 
-
+# ======= FUNÇÃO DE PREÇOS CORRIGIDA PARA PLANILHA EXCEL ==========
 def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataFrame) -> bytes:
     base_precos = order_df[['Descrição do Produto', 'CodigoPedido', 'PrecoPedido']].copy().drop_duplicates(subset=['Descrição do Produto'])
     base_precos['PRODUTO_KEY'] = base_precos['Descrição do Produto'].map(norm_key)
 
-    linhas_txt = []
-    
-    def extrair_linhas(df):
+    def make_df(df):
         if df.empty:
-            return
+            return pd.DataFrame(columns=['CODIGO', 'PRODUTO', 'PRECO'])
         produtos = sorted(df.index.tolist(), key=lambda x: str(x).strip().upper())
+        linhas = []
         for prod in produtos:
             key = norm_key(prod)
             achou = base_precos[base_precos['PRODUTO_KEY'] == key]
-            
             if not achou.empty:
                 row = achou.iloc[0]
-                codigo = str(row['CodigoPedido']).strip()
-                preco = row['PrecoPedido']
+                # Adiciona uma aspa simples invisível antes do código para forçar o Excel a reconhecer como Texto e não corromper ("virar código de barras")
+                codigo_formatado = f"'{str(row['CodigoPedido']).strip()}" if pd.notna(row['CodigoPedido']) and str(row['CodigoPedido']).strip() != "" else ""
                 
-                cod_numeros = "".join(filter(str.isdigit, codigo))
-                
-                if not cod_numeros or pd.isna(preco):
-                    continue
-                
-                try:
-                    preco_cents = int(round(float(preco) * 100))
-                    cod_formatado = cod_numeros.zfill(10)
-                    preco_formatado = str(preco_cents).zfill(10)
-                    linhas_txt.append(f"{cod_formatado}{preco_formatado}")
-                except Exception:
-                    continue
+                linhas.append({
+                    'CODIGO': codigo_formatado, 
+                    'PRODUTO': prod, 
+                    'PRECO': row['PrecoPedido']
+                })
+            else:
+                linhas.append({'CODIGO': '', 'PRODUTO': prod, 'PRECO': ''})
+        return pd.DataFrame(linhas)
 
-    extrair_linhas(frutas)
-    extrair_linhas(legumes)
+    frutas_df = make_df(frutas)
+    legumes_df = make_df(legumes)
     
-    linhas_unicas = list(dict.fromkeys(linhas_txt))
-    return "\n".join(linhas_unicas).encode('utf-8')
-
+    out = BytesIO()
+    with pd.ExcelWriter(out, engine='openpyxl') as writer:
+        frutas_df.to_excel(writer, sheet_name='FRUTAS', index=False)
+        legumes_df.to_excel(writer, sheet_name='LEGUMES', index=False)
+        
+        # Ajusta a largura das colunas para a planilha ficar bonita
+        for sheet_name in ['FRUTAS', 'LEGUMES']:
+            worksheet = writer.sheets[sheet_name]
+            worksheet.column_dimensions['A'].width = 18 # CODIGO
+            worksheet.column_dimensions['B'].width = 45 # PRODUTO
+            worksheet.column_dimensions['C'].width = 12 # PRECO
+            
+    out.seek(0)
+    return out.getvalue()
+# =================================================================
 
 def build_unknown(unknown: pd.DataFrame) -> bytes:
     out = BytesIO()
-
     if not unknown.empty:
-        df = pd.DataFrame(
-            {
-                "PRODUTO": sorted(unknown.index.tolist(), key=lambda x: norm_key(x))
-            }
-        )
+        df = pd.DataFrame({"PRODUTO": sorted(unknown.index.tolist(), key=lambda x: norm_key(x))})
     else:
         df = pd.DataFrame(columns=["PRODUTO"])
-
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="NAO_ENCONTRADOS", index=False)
-
     out.seek(0)
     return out.getvalue()
-
 
 st.title("📦 KRILL → THOTH (PRO)")
 st.caption("Modelos fixos no sistema. Mapeamento por número da loja. KRILL CD sempre vazio.")
@@ -451,11 +360,10 @@ if st.button("PROCESSAR", use_container_width=True, type="primary"):
     else:
         try:
             if not MODEL_FRUTAS.exists():
-                st.error(f"Modelo FRUTAS não encontrado: {MODEL_FRUTAS.name}. Verifique se o arquivo está na pasta.")
+                st.error(f"Modelo FRUTAS não encontrado: {MODEL_FRUTAS.name}.")
                 st.stop()
-
             if not MODEL_LEGUMES.exists():
-                st.error(f"Modelo LEGUMES não encontrado: {MODEL_LEGUMES.name}. Verifique se o arquivo está na pasta.")
+                st.error(f"Modelo LEGUMES não encontrado: {MODEL_LEGUMES.name}.")
                 st.stop()
 
             order_df, debug_info = read_order(uploaded)
@@ -464,9 +372,7 @@ if st.button("PROCESSAR", use_container_width=True, type="primary"):
             frutas_rows = get_cached_product_rows(str(MODEL_FRUTAS))
             legumes_rows = get_cached_product_rows(str(MODEL_LEGUMES))
 
-            frutas_df, legumes_df, unknown_df = split_by_models(
-                pivot, frutas_rows, legumes_rows
-            )
+            frutas_df, legumes_df, unknown_df = split_by_models(pivot, frutas_rows, legumes_rows)
 
             frutas_file = write_output(MODEL_FRUTAS, frutas_df)
             legumes_file = write_output(MODEL_LEGUMES, legumes_df)
@@ -492,38 +398,15 @@ if st.button("PROCESSAR", use_container_width=True, type="primary"):
 
             d1, d2, d3 = st.columns(3)
             with d1:
-                st.download_button(
-                    "Baixar FRUTAS",
-                    frutas_file,
-                    "KRILL_FRUTAS_Thoth.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
+                st.download_button("Baixar FRUTAS", frutas_file, "KRILL_FRUTAS_Thoth.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
             with d2:
-                st.download_button(
-                    "Baixar LEGUMES",
-                    legumes_file,
-                    "KRILL_LEGUMES_Thoth.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
+                st.download_button("Baixar LEGUMES", legumes_file, "KRILL_LEGUMES_Thoth.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
             with d3:
-                st.download_button(
-                    "Baixar PREÇOS",
-                    prices_file,
-                    "KRILL_PRECOS.txt",
-                    mime="text/plain",
-                    use_container_width=True,
-                )
+                # O BOTÃO VOLTOU PARA .xlsx COMO DEVERIA SER
+                st.download_button("Baixar PREÇOS", prices_file, "KRILL_PRECOS.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
             if not unknown_df.empty:
-                st.download_button(
-                    "Baixar NÃO ENCONTRADOS",
-                    unknown_file,
-                    "KRILL_NAO_ENCONTRADOS.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
+                st.download_button("Baixar NÃO ENCONTRADOS", unknown_file, "KRILL_NAO_ENCONTRADOS.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
         except Exception as e:
             st.error(f"Erro ao processar: {e}")
