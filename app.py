@@ -67,121 +67,138 @@ def find_header_row(raw: pd.DataFrame) -> int:
     )
 
 
-def find_required_column(df: pd.DataFrame, possibilities: list[str]):
-    normalized = {norm_key(col): col for col in df.columns}
-    for name in possibilities:
-        key = norm_key(name)
-        if key in normalized:
-            return normalized[key]
-    raise ValueError(
-        f"Coluna obrigatória não encontrada. Procurei por: {', '.join(possibilities)}"
-    )
-
-
-def find_optional_column_by_keywords(df: pd.DataFrame, keyword_groups: list[list[str]]):
-    for col in df.columns:
-        col_key = norm_key(col)
-        for group in keyword_groups:
-            if all(word in col_key for word in group):
-                return col
-    return None
-
-
-def parse_price_series(series):
-    if isinstance(series, pd.DataFrame):
-        series = series.bfill(axis=1).iloc[:, 0]
+def parse_price_series(series: pd.Series) -> pd.Series:
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce")
 
     s = series.astype(str).str.strip()
-    s = s.str.replace(".", "", regex=False)
-    s = s.str.replace(",", ".", regex=False)
-    s = s.str.replace(r"[^\d\.-]", "", regex=True)
-    return pd.to_numeric(s, errors="coerce").fillna(0)
+    s = s.replace({"": None, "nan": None, "None": None, "<NA>": None})
+
+    def convert(v):
+        if v is None or pd.isna(v):
+            return None
+        txt = str(v).strip()
+
+        if txt in ["", "nan", "<NA>"]:
+            return None
+
+        # Limpa símbolo de moeda caso exista
+        txt = txt.replace("R$", "").replace("r$", "").strip()
+
+        if "," in txt and "." in txt:
+            txt = txt.replace(".", "").replace(",", ".")
+        elif "," in txt:
+            txt = txt.replace(",", ".")
+
+        try:
+            return float(txt)
+        except Exception:
+            return None
+
+    return s.map(convert)
 
 
 def read_order(file):
     file_buffer = BytesIO(file.getvalue())
     raw = pd.read_excel(file_buffer, header=None)
-
+    
     header_row = find_header_row(raw)
 
+    # Resolve o problema de células mescladas e nomes repetidos
+    row_vals = raw.iloc[header_row].tolist()
+    new_cols = []
+    seen = {}
+    for c in row_vals:
+        base_c = norm_key(c)
+        if base_c == "":
+            base_c = "VAZIO"
+        if base_c in seen:
+            seen[base_c] += 1
+            new_cols.append(f"{base_c}_{seen[base_c]}")
+        else:
+            seen[base_c] = 0
+            new_cols.append(base_c)
+
     df = raw.iloc[header_row + 1:].copy()
-    df.columns = raw.iloc[header_row]
-    df.columns = [norm_text(c) for c in df.columns]
+    df.columns = new_cols
 
-    col_loja = find_required_column(df, ["Loja"])
-    col_produto = find_required_column(
-        df, ["Descrição do Produto", "Descricao do Produto", "Produto"]
-    )
-    col_qtde = find_required_column(df, ["Qtde.", "Qtde", "Quantidade"])
+    def get_exact_col(possibilities):
+        for p in possibilities:
+            k = norm_key(p)
+            if k in df.columns:
+                return df[k], k
+        raise ValueError(f"Coluna obrigatória não encontrada. Procurado: {possibilities}")
 
-    col_codigo = find_optional_column_by_keywords(
-        df,
-        [["CODIGO"], ["CÓDIGO"], ["COD"], ["CÓD"], ["ITEM"], ["SKU"], ["EAN"], ["GTIN"], ["BARRA"]],
-    )
+    col_loja_s, debug_loja = get_exact_col(["LOJA"])
+    col_produto_s, debug_produto = get_exact_col(["DESCRIÇÃO DO PRODUTO", "DESCRICAO DO PRODUTO", "PRODUTO"])
+    col_qtde_s, debug_qtde = get_exact_col(["QTDE.", "QTDE", "QUANTIDADE"])
 
-    col_preco = find_optional_column_by_keywords(
-        df,
-        [["PRECO"], ["PREÇO"], ["VALOR"], ["VLR"], ["UNITARIO"], ["UNITÁRIO"], ["UNIT"], ["CUSTO"]],
-    )
+    # Função Mágica que junta células mescladas
+    def extract_coalesced(keyword_groups):
+        for group in keyword_groups:
+            matching_cols = []
+            for col in df.columns:
+                base_col = re.sub(r'_\d+$', '', col).strip()
+                if all(word in base_col for word in group):
+                    matching_cols.append(col)
+            
+            if matching_cols:
+                temp_df = df[matching_cols].copy()
+                for c in temp_df.columns:
+                    temp_df[c] = temp_df[c].apply(
+                        lambda x: pd.NA if pd.isna(x) or str(x).strip() in ['', 'nan', 'None', '<NA>'] else x
+                    )
+                # Junta todas as colunas que foram mescladas preenchendo os buracos
+                s = temp_df.bfill(axis=1).iloc[:, 0]
+                return s, re.sub(r'_\d+$', '', matching_cols[0])
+                
+        return None, "NÃO ENCONTRADA"
 
-    cols = [col_loja, col_produto, col_qtde]
-    if col_codigo:
-        cols.append(col_codigo)
-    if col_preco:
-        cols.append(col_preco)
+    col_codigo_s, debug_codigo = extract_coalesced([["CODIGO"], ["CÓDIGO"], ["COD"], ["CÓD"], ["ITEM"], ["SKU"], ["EAN"], ["GTIN"], ["BARRA"]])
+    col_preco_s, debug_preco = extract_coalesced([["PRECO"], ["PREÇO"], ["VALOR"], ["VLR"], ["UNITARIO"], ["UNITÁRIO"], ["UNIT"], ["CUSTO"]])
 
-    df = df[cols].copy()
+    clean_df = pd.DataFrame()
+    clean_df["Loja"] = col_loja_s
+    clean_df["Descrição do Produto"] = col_produto_s
+    clean_df["Qtde."] = col_qtde_s
 
-    df[col_loja] = df[col_loja].map(norm_text)
-    df[col_produto] = df[col_produto].map(norm_text)
-    df[col_qtde] = pd.to_numeric(df[col_qtde], errors="coerce").fillna(0)
+    if col_codigo_s is not None:
+        clean_df["CodigoPedido"] = col_codigo_s
+    else:
+        clean_df["CodigoPedido"] = ""
 
-    if col_codigo:
-        if isinstance(df[col_codigo], pd.DataFrame):
-            df[col_codigo] = df[col_codigo].bfill(axis=1).iloc[:, 0]
-        df[col_codigo] = df[col_codigo].map(norm_text)
+    if col_preco_s is not None:
+        clean_df["PrecoPedido"] = col_preco_s
+    else:
+        clean_df["PrecoPedido"] = None
 
-    if col_preco:
-        df[col_preco] = parse_price_series(df[col_preco])
+    # Limpeza e Formatação Final
+    clean_df["Loja"] = clean_df["Loja"].map(norm_text)
+    clean_df["Descrição do Produto"] = clean_df["Descrição do Produto"].map(norm_text)
+    clean_df["Qtde."] = pd.to_numeric(clean_df["Qtde."], errors="coerce").fillna(0)
+    
+    clean_df["CodigoPedido"] = clean_df["CodigoPedido"].map(lambda x: norm_text(x) if pd.notna(x) else "")
+    clean_df["PrecoPedido"] = parse_price_series(clean_df["PrecoPedido"])
 
-    rename_map = {
-        col_loja: "Loja",
-        col_produto: "Descrição do Produto",
-        col_qtde: "Qtde.",
-    }
+    # Filtros
+    clean_df = clean_df[clean_df["Descrição do Produto"] != ""]
+    clean_df = clean_df[~clean_df["Descrição do Produto"].map(norm_key).isin(IGNORE_NAMES)]
+    clean_df = clean_df[clean_df["Loja"].str.fullmatch(r"\d+")]
+    clean_df = clean_df[clean_df["Loja"] != "0"]
+    clean_df = clean_df[clean_df["Qtde."] > 0]
 
-    if col_codigo and col_codigo in df.columns:
-        rename_map[col_codigo] = "CodigoPedido"
-
-    if col_preco and col_preco in df.columns:
-        rename_map[col_preco] = "PrecoPedido"
-
-    df = df.rename(columns=rename_map)
-
-    if "CodigoPedido" not in df.columns:
-        df["CodigoPedido"] = ""
-
-    if "PrecoPedido" not in df.columns:
-        df["PrecoPedido"] = ""
-
-    df = df[df["Descrição do Produto"] != ""]
-    df = df[~df["Descrição do Produto"].map(norm_key).isin(IGNORE_NAMES)]
-    df = df[df["Loja"].str.fullmatch(r"\d+")]
-    df = df[df["Loja"] != "0"]
-    df = df[df["Qtde."] > 0]
-
-    if df.empty:
+    if clean_df.empty:
         raise ValueError("Nenhum item válido foi encontrado no pedido.")
 
     debug_info = {
-        "col_loja": col_loja,
-        "col_produto": col_produto,
-        "col_qtde": col_qtde,
-        "col_codigo": col_codigo if col_codigo else "NÃO ENCONTRADA",
-        "col_preco": col_preco if col_preco else "NÃO ENCONTRADA",
+        "col_loja": debug_loja,
+        "col_produto": debug_produto,
+        "col_qtde": debug_qtde,
+        "col_codigo": debug_codigo,
+        "col_preco": debug_preco,
     }
 
-    return df, debug_info
+    return clean_df, debug_info
 
 
 def build_pivot(df: pd.DataFrame) -> pd.DataFrame:
@@ -309,10 +326,8 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
     prod_map = product_rows(ws)
 
     cols_to_clear = list(stores.values())
-    if total_col:
-        cols_to_clear.append(total_col)
-    if cd_col:
-        cols_to_clear.append(cd_col)
+    if total_col: cols_to_clear.append(total_col)
+    if cd_col: cols_to_clear.append(cd_col)
 
     for row in range(3, ws.max_row + 1):
         if norm_text(ws.cell(row, 1).value):
@@ -377,16 +392,8 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
 
 
 def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataFrame) -> bytes:
-    df_base = order_df.copy()
-
-    if "CodigoPedido" not in df_base.columns:
-        df_base["CodigoPedido"] = ""
-
-    if "PrecoPedido" not in df_base.columns:
-        df_base["PrecoPedido"] = ""
-
     base_precos = (
-        df_base[["Descrição do Produto", "CodigoPedido", "PrecoPedido"]]
+        order_df[["Descrição do Produto", "CodigoPedido", "PrecoPedido"]]
         .copy()
         .drop_duplicates(subset=["Descrição do Produto"])
     )
@@ -397,6 +404,7 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataF
         if df.empty:
             return pd.DataFrame(columns=["CÓDIGO", "PRODUTO", "PREÇO"])
 
+        # Garante a ordem alfabética de A-Z
         produtos = sorted(df.index.tolist(), key=lambda x: str(x).strip().upper())
         linhas = []
 
@@ -408,9 +416,9 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataF
                 row = achou.iloc[0]
                 linhas.append(
                     {
-                        "CÓDIGO": row.get("CodigoPedido", ""),
+                        "CÓDIGO": row["CodigoPedido"],
                         "PRODUTO": prod,
-                        "PREÇO": row.get("PrecoPedido", ""),
+                        "PREÇO": row["PrecoPedido"],
                     }
                 )
             else:
@@ -431,12 +439,13 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataF
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
         frutas_df.to_excel(writer, sheet_name="FRUTAS", index=False)
         legumes_df.to_excel(writer, sheet_name="LEGUMES", index=False)
-
+        
+        # Deixa a planilha de preços formatada (largura das colunas)
         for sheet_name in ["FRUTAS", "LEGUMES"]:
             worksheet = writer.sheets[sheet_name]
-            worksheet.column_dimensions["A"].width = 12
-            worksheet.column_dimensions["B"].width = 45
-            worksheet.column_dimensions["C"].width = 15
+            worksheet.column_dimensions['A'].width = 12
+            worksheet.column_dimensions['B'].width = 45
+            worksheet.column_dimensions['C'].width = 15
 
     out.seek(0)
     return out.getvalue()
@@ -481,15 +490,11 @@ if st.button("PROCESSAR", use_container_width=True, type="primary"):
     else:
         try:
             if not MODEL_FRUTAS.exists():
-                st.error(
-                    f"Modelo FRUTAS não encontrado: {MODEL_FRUTAS.name}. Verifique se o arquivo está na pasta."
-                )
+                st.error(f"Modelo FRUTAS não encontrado: {MODEL_FRUTAS.name}. Verifique se o arquivo está na pasta.")
                 st.stop()
 
             if not MODEL_LEGUMES.exists():
-                st.error(
-                    f"Modelo LEGUMES não encontrado: {MODEL_LEGUMES.name}. Verifique se o arquivo está na pasta."
-                )
+                st.error(f"Modelo LEGUMES não encontrado: {MODEL_LEGUMES.name}. Verifique se o arquivo está na pasta.")
                 st.stop()
 
             order_df, debug_info = read_order(uploaded)
