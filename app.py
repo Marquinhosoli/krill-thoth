@@ -67,118 +67,120 @@ def find_header_row(raw: pd.DataFrame) -> int:
     )
 
 
-def find_required_column(df: pd.DataFrame, possibilities: list[str]):
-    normalized = {norm_key(col): col for col in df.columns}
-    for name in possibilities:
-        key = norm_key(name)
-        if key in normalized:
-            return normalized[key]
-    raise ValueError(
-        f"Coluna obrigatória não encontrada. Procurei por: {', '.join(possibilities)}"
-    )
-
-
-def find_optional_column_by_keywords(df: pd.DataFrame, keyword_groups: list[list[str]]):
-    for col in df.columns:
-        col_key = norm_key(col)
-        for group in keyword_groups:
-            if all(word in col_key for word in group):
-                return col
-    return None
-
-
-def parse_price_series(series):
-    if isinstance(series, pd.DataFrame):
-        series = series.bfill(axis=1).iloc[:, 0]
+def parse_price_series(series: pd.Series) -> pd.Series:
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce")
 
     s = series.astype(str).str.strip()
-    s = s.str.replace(".", "", regex=False)
-    s = s.str.replace(",", ".", regex=False)
-    s = s.str.replace(r"[^\d\.-]", "", regex=True)
-    return pd.to_numeric(s, errors="coerce").fillna(0)
+    s = s.replace({"": None, "nan": None, "None": None})
+
+    def convert(v):
+        if v is None or pd.isna(v):
+            return None
+        txt = str(v).strip()
+
+        if txt == "":
+            return None
+
+        if "," in txt and "." in txt:
+            txt = txt.replace(".", "").replace(",", ".")
+        elif "," in txt:
+            txt = txt.replace(",", ".")
+
+        try:
+            return float(txt)
+        except Exception:
+            return None
+
+    return s.map(convert)
 
 
 def read_order(file):
     file_buffer = BytesIO(file.getvalue())
     raw = pd.read_excel(file_buffer, header=None)
-
+    
     header_row = find_header_row(raw)
+    
+    # Extrai a linha do cabeçalho
+    row_vals = raw.iloc[header_row].tolist()
+    norm_row = [norm_key(x) for x in row_vals]
+    
+    # Funções blindadas para caçar o ÍNDICE (posição) da coluna, e não o nome
+    def find_idx(possibilities):
+        for p in possibilities:
+            key = norm_key(p)
+            for i, val in enumerate(norm_row):
+                if key == val:
+                    return i
+        return None
+        
+    def find_idx_by_keyword(keyword_groups):
+        for i, val in enumerate(norm_row):
+            for group in keyword_groups:
+                if all(word in val for word in group):
+                    return i
+        return None
 
-    df = raw.iloc[header_row + 1:].copy()
-    df.columns = raw.iloc[header_row]
-    df.columns = [norm_text(c) for c in df.columns]
+    # Mapeamento exato da posição de cada coluna
+    idx_loja = find_idx(["Loja"])
+    idx_produto = find_idx(["Descrição do Produto", "Descricao do Produto", "Produto"])
+    idx_qtde = find_idx(["Qtde.", "Qtde", "Quantidade"])
+    
+    idx_codigo = find_idx_by_keyword([["CODIGO"], ["CÓDIGO"], ["COD"], ["CÓD"], ["ITEM"], ["SKU"], ["EAN"], ["GTIN"], ["BARRA"]])
+    idx_preco = find_idx_by_keyword([["PRECO"], ["PREÇO"], ["VALOR"], ["VLR"], ["UNITARIO"], ["UNITÁRIO"], ["UNIT"], ["CUSTO"]])
+    
+    if idx_loja is None or idx_produto is None or idx_qtde is None:
+        raise ValueError("Erro fatal: As colunas obrigatórias (Loja, Produto, Qtde) desapareceram ou estão vazias no arquivo.")
 
-    col_loja = find_required_column(df, ["Loja"])
-    col_produto = find_required_column(
-        df, ["Descrição do Produto", "Descricao do Produto", "Produto"]
-    )
-    col_qtde = find_required_column(df, ["Qtde.", "Qtde", "Quantidade"])
-
-    col_codigo = find_optional_column_by_keywords(
-        df,
-        [["CODIGO"], ["CÓDIGO"], ["COD"], ["CÓD"], ["ITEM"], ["SKU"], ["EAN"], ["GTIN"], ["BARRA"]],
-    )
-
-    col_preco = find_optional_column_by_keywords(
-        df,
-        [["PRECO"], ["PREÇO"], ["VALOR"], ["VLR"], ["UNITARIO"], ["UNITÁRIO"], ["UNIT"], ["CUSTO"]],
-    )
-
-    cols = [col_loja, col_produto, col_qtde]
-    if col_codigo:
-        cols.append(col_codigo)
-    if col_preco:
-        cols.append(col_preco)
-
-    df = df[cols].copy()
-
-    df[col_loja] = df[col_loja].map(norm_text)
-    df[col_produto] = df[col_produto].map(norm_text)
-    df[col_qtde] = pd.to_numeric(df[col_qtde], errors="coerce").fillna(0)
-
-    if col_codigo:
-        if isinstance(df[col_codigo], pd.DataFrame):
-            df[col_codigo] = df[col_codigo].bfill(axis=1).iloc[:, 0]
-        df[col_codigo] = df[col_codigo].map(norm_text)
+    # Pega apenas os dados abaixo do cabeçalho
+    df_raw = raw.iloc[header_row + 1:].copy()
+    
+    # Monta um novo DataFrame limpo buscando os dados diretamente pela posição
+    clean_df = pd.DataFrame()
+    clean_df["Loja"] = df_raw.iloc[:, idx_loja].copy()
+    clean_df["Descrição do Produto"] = df_raw.iloc[:, idx_produto].copy()
+    clean_df["Qtde."] = df_raw.iloc[:, idx_qtde].copy()
+    
+    if idx_codigo is not None:
+        clean_df["CodigoPedido"] = df_raw.iloc[:, idx_codigo].copy()
     else:
-        df["__CODIGO__"] = ""
-        col_codigo = "__CODIGO__"
-
-    if col_preco:
-        col_preco_data = df[col_preco]
-        df[col_preco] = parse_price_series(col_preco_data)
+        clean_df["CodigoPedido"] = ""
+        
+    if idx_preco is not None:
+        clean_df["PrecoPedido"] = df_raw.iloc[:, idx_preco].copy()
     else:
-        df["__PRECO__"] = None
-        col_preco = "__PRECO__"
+        clean_df["PrecoPedido"] = None
 
-    df = df[df[col_produto] != ""]
-    df = df[~df[col_produto].map(norm_key).isin(IGNORE_NAMES)]
-    df = df[df[col_loja].str.fullmatch(r"\d+")]
-    df = df[df[col_loja] != "0"]
-    df = df[df[col_qtde] > 0]
+    # Aplica formatação e normalização nos dados extraídos
+    clean_df["Loja"] = clean_df["Loja"].map(norm_text)
+    clean_df["Descrição do Produto"] = clean_df["Descrição do Produto"].map(norm_text)
+    clean_df["Qtde."] = pd.to_numeric(clean_df["Qtde."], errors="coerce").fillna(0)
+    
+    if idx_codigo is not None:
+        clean_df["CodigoPedido"] = clean_df["CodigoPedido"].map(norm_text)
+        
+    if idx_preco is not None:
+        clean_df["PrecoPedido"] = parse_price_series(clean_df["PrecoPedido"])
 
-    if df.empty:
+    # Filtros finais
+    clean_df = clean_df[clean_df["Descrição do Produto"] != ""]
+    clean_df = clean_df[~clean_df["Descrição do Produto"].map(norm_key).isin(IGNORE_NAMES)]
+    clean_df = clean_df[clean_df["Loja"].str.fullmatch(r"\d+")]
+    clean_df = clean_df[clean_df["Loja"] != "0"]
+    clean_df = clean_df[clean_df["Qtde."] > 0]
+
+    if clean_df.empty:
         raise ValueError("Nenhum item válido foi encontrado no pedido.")
 
-    df = df.rename(
-        columns={
-            col_loja: "Loja",
-            col_produto: "Descrição do Produto",
-            col_qtde: "Qtde.",
-            col_codigo: "CodigoPedido",
-            col_preco: "PrecoPedido",
-        }
-    )
-
     debug_info = {
-        "col_loja": col_loja,
-        "col_produto": col_produto,
-        "col_qtde": col_qtde,
-        "col_codigo": col_codigo if col_codigo != "__CODIGO__" else "NÃO ENCONTRADA",
-        "col_preco": col_preco if col_preco != "__PRECO__" else "NÃO ENCONTRADA",
+        "col_loja": str(row_vals[idx_loja]),
+        "col_produto": str(row_vals[idx_produto]),
+        "col_qtde": str(row_vals[idx_qtde]),
+        "col_codigo": str(row_vals[idx_codigo]) if idx_codigo is not None else "NÃO ENCONTRADA",
+        "col_preco": str(row_vals[idx_preco]) if idx_preco is not None else "NÃO ENCONTRADA",
     }
 
-    return df, debug_info
+    return clean_df, debug_info
 
 
 def build_pivot(df: pd.DataFrame) -> pd.DataFrame:
@@ -306,10 +308,8 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
     prod_map = product_rows(ws)
 
     cols_to_clear = list(stores.values())
-    if total_col:
-        cols_to_clear.append(total_col)
-    if cd_col:
-        cols_to_clear.append(cd_col)
+    if total_col: cols_to_clear.append(total_col)
+    if cd_col: cols_to_clear.append(cd_col)
 
     for row in range(3, ws.max_row + 1):
         if norm_text(ws.cell(row, 1).value):
@@ -386,6 +386,7 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataF
         if df.empty:
             return pd.DataFrame(columns=["CÓDIGO", "PRODUTO", "PREÇO"])
 
+        # Garante a ordem alfabética de A-Z
         produtos = sorted(df.index.tolist(), key=lambda x: str(x).strip().upper())
         linhas = []
 
@@ -420,12 +421,13 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataF
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
         frutas_df.to_excel(writer, sheet_name="FRUTAS", index=False)
         legumes_df.to_excel(writer, sheet_name="LEGUMES", index=False)
-
+        
+        # Deixa a planilha de preços formatada (largura das colunas)
         for sheet_name in ["FRUTAS", "LEGUMES"]:
             worksheet = writer.sheets[sheet_name]
-            worksheet.column_dimensions["A"].width = 12
-            worksheet.column_dimensions["B"].width = 45
-            worksheet.column_dimensions["C"].width = 15
+            worksheet.column_dimensions['A'].width = 12
+            worksheet.column_dimensions['B'].width = 45
+            worksheet.column_dimensions['C'].width = 15
 
     out.seek(0)
     return out.getvalue()
@@ -470,15 +472,11 @@ if st.button("PROCESSAR", use_container_width=True, type="primary"):
     else:
         try:
             if not MODEL_FRUTAS.exists():
-                st.error(
-                    f"Modelo FRUTAS não encontrado: {MODEL_FRUTAS.name}. Verifique se o arquivo está na pasta."
-                )
+                st.error(f"Modelo FRUTAS não encontrado: {MODEL_FRUTAS.name}. Verifique se o arquivo está na pasta.")
                 st.stop()
 
             if not MODEL_LEGUMES.exists():
-                st.error(
-                    f"Modelo LEGUMES não encontrado: {MODEL_LEGUMES.name}. Verifique se o arquivo está na pasta."
-                )
+                st.error(f"Modelo LEGUMES não encontrado: {MODEL_LEGUMES.name}. Verifique se o arquivo está na pasta.")
                 st.stop()
 
             order_df, debug_info = read_order(uploaded)
