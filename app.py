@@ -1,7 +1,13 @@
+import streamlit as st
 import pandas as pd
 from io import BytesIO
 import re
 import unicodedata
+
+st.set_page_config(page_title="KRILL → THOTH", layout="wide")
+
+st.title("KRILL → THOTH")
+st.caption("Modelos fixos no sistema. Mapeamento por número da loja. KRILL COD e PREÇO saem do pedido atual.")
 
 def normalizar_texto(txt):
     txt = "" if txt is None else str(txt)
@@ -26,9 +32,6 @@ def para_numero(valor):
 def extrair_numero_loja(loja):
     m = re.search(r"(\d+)", str(loja))
     return int(m.group(1)) if m else None
-
-def nome_coluna_krill(numero):
-    return f"KRILL {numero}"
 
 def detectar_coluna(df, candidatos):
     mapa = {normalizar_texto(c): c for c in df.columns}
@@ -71,7 +74,7 @@ def classificar_categoria(nome_produto, frutas_modelo, legumes_modelo):
 def gerar_planilha_precos(pedido_df, modelo_frutas_df, modelo_legumes_df):
     col_produto = detectar_coluna(pedido_df, ["Produto", "Descrição do Produto", "Descricao do Produto", "Item"])
     col_codigo = detectar_coluna(pedido_df, ["Código", "Codigo", "Cod"])
-    col_preco = detectar_coluna(pedido_df, ["Preço", "Preco", "GTIN/PLU Unitário", "Valor Unitário", "Valor"])
+    col_preco = detectar_coluna(pedido_df, ["Preço", "Preco", "GTIN/PLU Unitário", "GTIN/PLU Unitario", "Valor Unitário", "Valor Unitario", "Valor"])
     col_loja = detectar_coluna(pedido_df, ["Loja", "Loja Destino", "Destino"])
 
     if not col_produto:
@@ -119,11 +122,7 @@ def gerar_planilha_precos(pedido_df, modelo_frutas_df, modelo_legumes_df):
         if categoria == "FRUTAS":
             nome_final = frutas_modelo.get(nome_norm, produto_original)
             if nome_final not in frutas:
-                frutas[nome_final] = {
-                    "CODIGO": codigo,
-                    "PRODUTO": nome_final,
-                    "PRECO": preco
-                }
+                frutas[nome_final] = {"CODIGO": codigo, "PRODUTO": nome_final, "PRECO": preco}
             else:
                 if not frutas[nome_final]["CODIGO"] and codigo:
                     frutas[nome_final]["CODIGO"] = codigo
@@ -132,19 +131,25 @@ def gerar_planilha_precos(pedido_df, modelo_frutas_df, modelo_legumes_df):
         else:
             nome_final = legumes_modelo.get(nome_norm, produto_original)
             if nome_final not in legumes:
-                legumes[nome_final] = {
-                    "CODIGO": codigo,
-                    "PRODUTO": nome_final,
-                    "PRECO": preco
-                }
+                legumes[nome_final] = {"CODIGO": codigo, "PRODUTO": nome_final, "PRECO": preco}
             else:
                 if not legumes[nome_final]["CODIGO"] and codigo:
                     legumes[nome_final]["CODIGO"] = codigo
                 if legumes[nome_final]["PRECO"] == 0 and preco:
                     legumes[nome_final]["PRECO"] = preco
 
-    df_frutas = pd.DataFrame(list(frutas.values())).sort_values("PRODUTO")
-    df_legumes = pd.DataFrame(list(legumes.values())).sort_values("PRODUTO")
+    df_frutas = pd.DataFrame(list(frutas.values()))
+    df_legumes = pd.DataFrame(list(legumes.values()))
+
+    if not df_frutas.empty:
+        df_frutas = df_frutas.sort_values("PRODUTO")
+    else:
+        df_frutas = pd.DataFrame(columns=["CODIGO", "PRODUTO", "PRECO"])
+
+    if not df_legumes.empty:
+        df_legumes = df_legumes.sort_values("PRODUTO")
+    else:
+        df_legumes = pd.DataFrame(columns=["CODIGO", "PRODUTO", "PRECO"])
 
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -154,7 +159,42 @@ def gerar_planilha_precos(pedido_df, modelo_frutas_df, modelo_legumes_df):
         for aba in ["FRUTAS", "LEGUMES"]:
             ws = writer.book[aba]
             for row in ws.iter_rows(min_row=2):
-                row[2].number_format = 'R$ #,##0.00'
+                if len(row) >= 3:
+                    row[2].number_format = 'R$ #,##0.00'
 
     output.seek(0)
-    return output
+    return output, df_frutas, df_legumes
+
+pedido_file = st.file_uploader("Pedido Krill", type=["xlsx", "xls"], key="pedido")
+frutas_file = st.file_uploader("Modelo FRUTAS", type=["xlsx", "xls"], key="frutas")
+legumes_file = st.file_uploader("Modelo LEGUMES", type=["xlsx", "xls"], key="legumes")
+
+if pedido_file and frutas_file and legumes_file:
+    try:
+        pedido_df = pd.read_excel(pedido_file)
+        modelo_frutas_df = pd.read_excel(frutas_file)
+        modelo_legumes_df = pd.read_excel(legumes_file)
+
+        arquivo_precos, df_frutas, df_legumes = gerar_planilha_precos(
+            pedido_df, modelo_frutas_df, modelo_legumes_df
+        )
+
+        st.success("Planilha de códigos e preços gerada com sucesso.")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            st.write("FRUTAS")
+            st.dataframe(df_frutas, use_container_width=True)
+        with c2:
+            st.write("LEGUMES")
+            st.dataframe(df_legumes, use_container_width=True)
+
+        st.download_button(
+            "Baixar PREÇOS",
+            data=arquivo_precos,
+            file_name="KRILL_PRECOS.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    except Exception as e:
+        st.error(f"Erro ao processar: {e}")
