@@ -10,7 +10,6 @@ from openpyxl import load_workbook
 st.set_page_config(page_title="KRILL → THOTH (PRO)", page_icon="📦", layout="wide")
 
 BASE_DIR = Path(__file__).resolve().parent
-
 IGNORE_NAMES = {"", "TOTAL", "TOTAIS", "SUBTOTAL", "SUB-TOTAL", "PRODUTO", "PRODUTOS"}
 
 
@@ -95,7 +94,7 @@ def build_pivot(df: pd.DataFrame) -> pd.DataFrame:
     return pivot.reindex(cols, axis=1)
 
 
-def extract_store_number(v1, v2) -> str | None:
+def extract_store_number(v1, v2):
     c1 = norm_key(v1)
     c2 = norm_key(v2)
 
@@ -262,36 +261,19 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
 
 
 def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame) -> bytes:
-
     def make_df(df):
         if df.empty:
             return pd.DataFrame(columns=["CODIGO", "PRODUTO", "PRECO"])
 
-        # ordena alfabeticamente (seguro)
         produtos = sorted(df.index.tolist(), key=lambda x: norm_key(x))
 
-        tabela = pd.DataFrame({
-            "CODIGO": [""] * len(produtos),
-            "PRODUTO": produtos,
-            "PRECO": [""] * len(produtos),
-        })
-        def build_unknown(unknown: pd.DataFrame) -> bytes:
-    out = BytesIO()
-
-    if not unknown.empty:
-        df = pd.DataFrame({
-            "PRODUTO": sorted(unknown.index.tolist(), key=lambda x: norm_key(x))
-        })
-    else:
-        df = pd.DataFrame(columns=["PRODUTO"])
-
-    with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name="NAO_ENCONTRADOS", index=False)
-
-    out.seek(0)
-    return out.getvalue()
-
-        return tabela
+        return pd.DataFrame(
+            {
+                "CODIGO": [""] * len(produtos),
+                "PRODUTO": produtos,
+                "PRECO": [""] * len(produtos),
+            }
+        )
 
     frutas_df = make_df(frutas)
     legumes_df = make_df(legumes)
@@ -300,6 +282,25 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame) -> bytes:
     with pd.ExcelWriter(out, engine="openpyxl") as writer:
         frutas_df.to_excel(writer, sheet_name="FRUTAS", index=False)
         legumes_df.to_excel(writer, sheet_name="LEGUMES", index=False)
+
+    out.seek(0)
+    return out.getvalue()
+
+
+def build_unknown(unknown: pd.DataFrame) -> bytes:
+    out = BytesIO()
+
+    if not unknown.empty:
+        df = pd.DataFrame(
+            {
+                "PRODUTO": sorted(unknown.index.tolist(), key=lambda x: norm_key(x))
+            }
+        )
+    else:
+        df = pd.DataFrame(columns=["PRODUTO"])
+
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
+        df.to_excel(writer, sheet_name="NAO_ENCONTRADOS", index=False)
 
     out.seek(0)
     return out.getvalue()
@@ -340,7 +341,9 @@ if st.button("PROCESSAR", use_container_width=True, type="primary"):
             frutas_rows = product_rows(wb_f.active)
             legumes_rows = product_rows(wb_l.active)
 
-            frutas_df, legumes_df, unknown_df = split_by_models(pivot, frutas_rows, legumes_rows)
+            frutas_df, legumes_df, unknown_df = split_by_models(
+                pivot, frutas_rows, legumes_rows
+            )
 
             frutas_file = write_output(MODEL_FRUTAS, frutas_df)
             legumes_file = write_output(MODEL_LEGUMES, legumes_df)
