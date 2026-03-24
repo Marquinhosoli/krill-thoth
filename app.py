@@ -46,75 +46,115 @@ MODEL_LEGUMES = resolve_model_path("modelo_legumes.xlsx")
 
 def find_header_row(raw: pd.DataFrame) -> int:
     for i in range(len(raw)):
-        row = [norm_text(x) for x in raw.iloc[i].tolist()]
-        row_keys = [norm_key(x) for x in row]
+        row = [norm_key(x) for x in raw.iloc[i].tolist()]
 
-        has_loja = "LOJA" in row_keys
+        has_loja = "LOJA" in row
         has_produto = (
-            "DESCRIÇÃO DO PRODUTO" in row_keys
-            or "DESCRICAO DO PRODUTO" in row_keys
-            or "PRODUTO" in row_keys
+            "DESCRIÇÃO DO PRODUTO" in row
+            or "DESCRICAO DO PRODUTO" in row
+            or "PRODUTO" in row
         )
-        has_qtde = "QTDE." in row_keys or "QTDE" in row_keys or "QUANTIDADE" in row_keys
+        has_qtde = (
+            "QTDE." in row
+            or "QTDE" in row
+            or "QUANTIDADE" in row
+        )
 
         if has_loja and has_produto and has_qtde:
             return i
 
     raise ValueError(
         "Não encontrei o cabeçalho do pedido. "
-        "É necessário ter as colunas Loja, Descrição do Produto e Qtde."
+        "Precisa existir Loja, Descrição do Produto e Qtde."
     )
 
 
-def find_first_column(df: pd.DataFrame, possibilities: list[str], required: bool = False):
+def find_required_column(df: pd.DataFrame, possibilities: list[str]):
     normalized = {norm_key(col): col for col in df.columns}
-
     for name in possibilities:
         key = norm_key(name)
         if key in normalized:
             return normalized[key]
+    raise ValueError(f"Coluna obrigatória não encontrada. Procurei por: {', '.join(possibilities)}")
 
-    if required:
-        raise ValueError(f"Coluna obrigatória não encontrada. Procurei por: {', '.join(possibilities)}")
 
+def find_optional_column_by_keywords(df: pd.DataFrame, keyword_groups: list[list[str]]):
+    for col in df.columns:
+        col_key = norm_key(col)
+        for group in keyword_groups:
+            if all(word in col_key for word in group):
+                return col
     return None
 
 
-def read_order(file) -> pd.DataFrame:
+def parse_price_series(series: pd.Series) -> pd.Series:
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce")
+
+    s = series.astype(str).str.strip()
+    s = s.replace({"": None, "nan": None, "None": None})
+
+    def convert(v):
+        if v is None or pd.isna(v):
+            return None
+        txt = str(v).strip()
+
+        if txt == "":
+            return None
+
+        # Caso brasileiro: 1.234,56
+        if "," in txt and "." in txt:
+            txt = txt.replace(".", "").replace(",", ".")
+        # Caso brasileiro simples: 12,34
+        elif "," in txt:
+            txt = txt.replace(",", ".")
+        # Caso já esteja em formato 12.34, mantém
+
+        try:
+            return float(txt)
+        except Exception:
+            return None
+
+    return s.map(convert)
+
+
+def read_order(file):
     raw = pd.read_excel(file, header=None)
     header_row = find_header_row(raw)
 
     df = raw.iloc[header_row + 1:].copy()
     df.columns = raw.iloc[header_row]
+    df.columns = [norm_text(c) for c in df.columns]
 
-    col_loja = find_first_column(df, ["Loja"], required=True)
-    col_produto = find_first_column(
-        df,
-        ["Descrição do Produto", "Descricao do Produto", "Produto"],
-        required=True,
-    )
-    col_qtde = find_first_column(df, ["Qtde.", "Qtde", "Quantidade"], required=True)
+    col_loja = find_required_column(df, ["Loja"])
+    col_produto = find_required_column(df, ["Descrição do Produto", "Descricao do Produto", "Produto"])
+    col_qtde = find_required_column(df, ["Qtde.", "Qtde", "Quantidade"])
 
-    col_codigo = find_first_column(
-        df,
-        ["Código", "Codigo", "Cód.", "Cod.", "Cod", "Código Produto", "Codigo Produto"],
-        required=False,
-    )
-
-    col_preco = find_first_column(
+    # Mais tolerante para achar CÓDIGO
+    col_codigo = find_optional_column_by_keywords(
         df,
         [
-            "Preço",
-            "Preco",
-            "Preço Venda",
-            "Preco Venda",
-            "Valor",
-            "Unitário",
-            "Unitario",
-            "Preço Unitário",
-            "Preco Unitario",
+            ["COD"],
+            ["CÓD"],
+            ["CODIGO"],
+            ["CÓDIGO"],
+            ["ITEM"],
+            ["SKU"],
         ],
-        required=False,
+    )
+
+    # Mais tolerante para achar PREÇO
+    col_preco = find_optional_column_by_keywords(
+        df,
+        [
+            ["PRECO"],
+            ["PREÇO"],
+            ["VALOR"],
+            ["UNITARIO"],
+            ["UNITÁRIO"],
+            ["PRECO", "VENDA"],
+            ["PREÇO", "VENDA"],
+        ],
     )
 
     cols = [col_loja, col_produto, col_qtde]
@@ -136,13 +176,7 @@ def read_order(file) -> pd.DataFrame:
         col_codigo = "__CODIGO__"
 
     if col_preco:
-        preco_series = (
-            df[col_preco]
-            .astype(str)
-            .str.replace(".", "", regex=False)
-            .str.replace(",", ".", regex=False)
-        )
-        df[col_preco] = pd.to_numeric(preco_series, errors="coerce")
+        df[col_preco] = parse_price_series(df[col_preco])
     else:
         df["__PRECO__"] = None
         col_preco = "__PRECO__"
@@ -166,7 +200,15 @@ def read_order(file) -> pd.DataFrame:
         }
     )
 
-    return df
+    debug_info = {
+        "col_loja": col_loja,
+        "col_produto": col_produto,
+        "col_qtde": col_qtde,
+        "col_codigo": col_codigo if col_codigo != "__CODIGO__" else "NÃO ENCONTRADA",
+        "col_preco": col_preco if col_preco != "__PRECO__" else "NÃO ENCONTRADA",
+    }
+
+    return df, debug_info
 
 
 def build_pivot(df: pd.DataFrame) -> pd.DataFrame:
@@ -352,7 +394,7 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataF
     base_precos = (
         order_df[["Descrição do Produto", "CodigoPedido", "PrecoPedido"]]
         .copy()
-        .drop_duplicates()
+        .drop_duplicates(subset=["Descrição do Produto"])
     )
 
     base_precos["PRODUTO_KEY"] = base_precos["Descrição do Produto"].map(norm_key)
@@ -446,7 +488,7 @@ if st.button("PROCESSAR", use_container_width=True, type="primary"):
                 st.error(f"Modelo LEGUMES não encontrado: {MODEL_LEGUMES}")
                 st.stop()
 
-            order_df = read_order(uploaded)
+            order_df, debug_info = read_order(uploaded)
             pivot = build_pivot(order_df)
 
             wb_f = load_workbook(MODEL_FRUTAS)
@@ -465,6 +507,15 @@ if st.button("PROCESSAR", use_container_width=True, type="primary"):
             unknown_file = build_unknown(unknown_df)
 
             st.success("Processamento concluído com sucesso.")
+
+            st.caption(
+                f"Colunas encontradas no pedido → "
+                f"Loja: {debug_info['col_loja']} | "
+                f"Produto: {debug_info['col_produto']} | "
+                f"Qtde: {debug_info['col_qtde']} | "
+                f"Código: {debug_info['col_codigo']} | "
+                f"Preço: {debug_info['col_preco']}"
+            )
 
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("Itens FRUTAS", len(frutas_df.index))
