@@ -85,9 +85,15 @@ def find_optional_column_by_keywords(df: pd.DataFrame, keyword_groups: list[list
     return None
 
 
-def parse_price_series(series: pd.Series) -> pd.Series:
-    if pd.api.types.is_numeric_dtype(series):
-        return pd.to_numeric(series, errors="coerce")
+def parse_price_series(series):
+    if isinstance(series, pd.DataFrame):
+        series = series.bfill(axis=1).iloc[:, 0]
+
+    s = series.astype(str).str.strip()
+    s = s.str.replace(".", "", regex=False)
+    s = s.str.replace(",", ".", regex=False)
+    s = s.str.replace(r"[^\d\.-]", "", regex=True)
+    return pd.to_numeric(s, errors="coerce").fillna(0)
 
     s = series.astype(str).str.strip()
     s = s.replace({"": None, "nan": None, "None": None})
@@ -157,7 +163,8 @@ def read_order(file):
         col_codigo = "__CODIGO__"
 
     if col_preco:
-        df[col_preco] = parse_price_series(df[col_preco])
+       col_preco_data = df[col_preco]
+df[col_preco] = parse_price_series(col_preco_data)
     else:
         df["__PRECO__"] = None
         col_preco = "__PRECO__"
