@@ -1,14 +1,25 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
+from pathlib import Path
 import re
 import unicodedata
 
 st.set_page_config(page_title="KRILL → THOTH", layout="wide")
 
-st.title("KRILL → THOTH")
-st.caption("Modelos fixos no sistema. Mapeamento por número da loja. KRILL COD e PREÇO saem do pedido atual.")
+# =========================
+# CONFIG
+# =========================
+BASE_DIR = Path(__file__).resolve().parent
+ARQUIVO_MODELO_FRUTAS = BASE_DIR / "KRILL_FRUTAS_Branco.xlsx"
+ARQUIVO_MODELO_LEGUMES = BASE_DIR / "KRILL_LEGUMES_Branco.xlsx"
 
+st.title("KRILL → THOTH")
+st.caption("Modelos fixos no sistema. Mapeamento por número da loja. Código e preço saem do pedido original.")
+
+# =========================
+# FUNÇÕES BASE
+# =========================
 def normalizar_texto(txt):
     txt = "" if txt is None else str(txt)
     txt = unicodedata.normalize("NFD", txt)
@@ -33,6 +44,9 @@ def extrair_numero_loja(loja):
     m = re.search(r"(\d+)", str(loja))
     return int(m.group(1)) if m else None
 
+def nome_coluna_krill(numero):
+    return f"KRILL {numero}"
+
 def detectar_coluna(df, candidatos):
     mapa = {normalizar_texto(c): c for c in df.columns}
     for cand in candidatos:
@@ -41,6 +55,44 @@ def detectar_coluna(df, candidatos):
             return mapa[n]
     return None
 
+def ajustar_largura(ws, larguras):
+    ws.column_dimensions["A"].width = larguras[0]
+    if len(larguras) > 1:
+        from openpyxl.utils import get_column_letter
+        for i, largura in enumerate(larguras[1:], start=2):
+            ws.column_dimensions[get_column_letter(i)].width = largura
+
+# =========================
+# LEITURA MODELOS FIXOS
+# =========================
+def carregar_modelos_fixos():
+    if not ARQUIVO_MODELO_FRUTAS.exists():
+        raise FileNotFoundError(f"Arquivo não encontrado: {ARQUIVO_MODELO_FRUTAS.name}")
+    if not ARQUIVO_MODELO_LEGUMES.exists():
+        raise FileNotFoundError(f"Arquivo não encontrado: {ARQUIVO_MODELO_LEGUMES.name}")
+
+    modelo_frutas_df = pd.read_excel(ARQUIVO_MODELO_FRUTAS)
+    modelo_legumes_df = pd.read_excel(ARQUIVO_MODELO_LEGUMES)
+
+    return modelo_frutas_df, modelo_legumes_df
+
+def primeira_coluna_nome(df):
+    return df.columns[0]
+
+def mapear_modelo_por_nome(df_modelo):
+    col = primeira_coluna_nome(df_modelo)
+    mapa = {}
+    ordem = []
+    for _, row in df_modelo.iterrows():
+        nome = str(row[col]).strip() if pd.notna(row[col]) else ""
+        if nome:
+            mapa[normalizar_texto(nome)] = nome
+            ordem.append(nome)
+    return mapa, ordem
+
+# =========================
+# CLASSIFICAÇÃO
+# =========================
 def classificar_categoria(nome_produto, frutas_modelo, legumes_modelo):
     nome_norm = normalizar_texto(nome_produto)
 
@@ -51,10 +103,11 @@ def classificar_categoria(nome_produto, frutas_modelo, legumes_modelo):
 
     chaves_legumes = [
         "ABOBRINHA","ABOBORA","AIPIM","ALFACE","ALHO","BATATA","BATATA DOCE",
-        "BERINJELA","BETERRABA","BROCOLIS","CEBOLA","CENOURA","CHUCHU","COUVE",
-        "COUVE FLOR","ERVILHA","ESPINAFRE","INHAME","JILO","MANDIOCA",
-        "MANDIOQUINHA","MAXIXE","MILHO","MILHO VERDE","PEPINO","PIMENTA",
-        "PIMENTAO","QUIABO","REPOLHO","RUCULA","SALSINHA","TOMATE","VAGEM"
+        "BERINJELA","BETERRABA","BROCOLIS","BROCOLIS NINJA","BROCOLIS RAMOSO",
+        "CEBOLA","CENOURA","CHUCHU","COUVE","COUVE FLOR","ERVILHA","ESPINAFRE",
+        "INHAME","JILO","MANDIOCA","MANDIOQUINHA","MAXIXE","MILHO","MILHO VERDE",
+        "PEPINO","PEPINO JAPONES","PIMENTA","PIMENTAO","QUIABO","REPOLHO",
+        "RUCULA","SALSINHA","TOMATE","TOMATE CEREJA","TOMATE GRAPE","VAGEM"
     ]
 
     chaves_frutas = [
@@ -71,67 +124,175 @@ def classificar_categoria(nome_produto, frutas_modelo, legumes_modelo):
 
     return "LEGUMES"
 
-def gerar_planilha_precos(pedido_df, modelo_frutas_df, modelo_legumes_df):
-    col_produto = detectar_coluna(pedido_df, ["Produto", "Descrição do Produto", "Descricao do Produto", "Item"])
-    col_codigo = detectar_coluna(pedido_df, ["Código", "Codigo", "Cod"])
-    col_preco = detectar_coluna(pedido_df, ["Preço", "Preco", "GTIN/PLU Unitário", "GTIN/PLU Unitario", "Valor Unitário", "Valor Unitario", "Valor"])
-    col_loja = detectar_coluna(pedido_df, ["Loja", "Loja Destino", "Destino"])
+# =========================
+# DETECTAR COLUNAS PEDIDO
+# =========================
+def detectar_campos_pedido(df):
+    col_produto = detectar_coluna(df, [
+        "Descrição do Produto", "Descricao do Produto", "Produto", "Item", "Descrição", "Descricao"
+    ])
+    col_qtd = detectar_coluna(df, [
+        "Qtde.", "Qtde", "Quantidade", "Qtd", "Caixas", "Qtd. Pedido"
+    ])
+    col_loja = detectar_coluna(df, [
+        "Loja", "Loja Destino", "Destino", "Filial", "Numero Loja"
+    ])
+    col_codigo = detectar_coluna(df, [
+        "Código", "Codigo", "Cod", "Código do Produto", "Codigo do Produto"
+    ])
+    col_preco = detectar_coluna(df, [
+        "Preço", "Preco", "GTIN/PLU Unitário", "GTIN/PLU Unitario", "Valor Unitário",
+        "Valor Unitario", "Valor", "Preço Unitário", "Preco Unitario"
+    ])
 
-    if not col_produto:
+    return {
+        "produto": col_produto,
+        "qtd": col_qtd,
+        "loja": col_loja,
+        "codigo": col_codigo,
+        "preco": col_preco,
+    }
+
+# =========================
+# GERAÇÃO PRINCIPAL FRUTAS/LEGUMES
+# =========================
+def gerar_planilhas_principais(pedido_df, modelo_frutas_df, modelo_legumes_df):
+    campos = detectar_campos_pedido(pedido_df)
+
+    if not campos["produto"]:
         raise ValueError("Não encontrei a coluna de produto no pedido.")
-    if not col_loja:
+    if not campos["qtd"]:
+        raise ValueError("Não encontrei a coluna de quantidade no pedido.")
+    if not campos["loja"]:
         raise ValueError("Não encontrei a coluna de loja no pedido.")
 
-    frutas_modelo = {}
-    legumes_modelo = {}
+    mapa_frutas, ordem_frutas = mapear_modelo_por_nome(modelo_frutas_df)
+    mapa_legumes, ordem_legumes = mapear_modelo_por_nome(modelo_legumes_df)
 
-    for _, row in modelo_frutas_df.iterrows():
-        nome = str(row.iloc[0]).strip()
-        if nome:
-            frutas_modelo[normalizar_texto(nome)] = nome
+    lojas_encontradas = set()
+    frutas_agrupadas = {}
+    legumes_agrupadas = {}
 
-    for _, row in modelo_legumes_df.iterrows():
-        nome = str(row.iloc[0]).strip()
-        if nome:
-            legumes_modelo[normalizar_texto(nome)] = nome
+    for _, row in pedido_df.iterrows():
+        produto_original = str(row[campos["produto"]]).strip() if pd.notna(row[campos["produto"]]) else ""
+        if not produto_original:
+            continue
+
+        qtd = para_numero(row[campos["qtd"]])
+        if qtd == 0:
+            continue
+
+        loja = row[campos["loja"]]
+        numero_loja = extrair_numero_loja(loja)
+        if numero_loja is None:
+            continue
+
+        col_loja = nome_coluna_krill(numero_loja)
+        lojas_encontradas.add(col_loja)
+
+        categoria = classificar_categoria(produto_original, mapa_frutas, mapa_legumes)
+        nome_norm = normalizar_texto(produto_original)
+
+        if categoria == "FRUTAS":
+            nome_final = mapa_frutas.get(nome_norm, produto_original)
+            if nome_final not in frutas_agrupadas:
+                frutas_agrupadas[nome_final] = {}
+            frutas_agrupadas[nome_final][col_loja] = frutas_agrupadas[nome_final].get(col_loja, 0) + qtd
+        else:
+            nome_final = mapa_legumes.get(nome_norm, produto_original)
+            if nome_final not in legumes_agrupadas:
+                legumes_agrupadas[nome_final] = {}
+            legumes_agrupadas[nome_final][col_loja] = legumes_agrupadas[nome_final].get(col_loja, 0) + qtd
+
+    lojas_ordenadas = sorted(
+        list(lojas_encontradas),
+        key=lambda x: int(re.search(r"(\d+)", x).group(1))
+    )
+
+    def montar_df(agrupado, ordem_modelo):
+        nomes_existentes = set(agrupado.keys())
+        nomes_fora_modelo = [n for n in agrupado.keys() if n not in ordem_modelo]
+        ordem_final = list(ordem_modelo) + sorted(nomes_fora_modelo, key=lambda x: normalizar_texto(x))
+
+        linhas = []
+        for nome in ordem_final:
+            if nome in nomes_existentes or nome in ordem_modelo:
+                linha = {"PRODUTO": nome}
+                for loja in lojas_ordenadas:
+                    linha[loja] = agrupado.get(nome, {}).get(loja, 0)
+                linhas.append(linha)
+
+        return pd.DataFrame(linhas)
+
+    df_frutas = montar_df(frutas_agrupadas, ordem_frutas)
+    df_legumes = montar_df(legumes_agrupadas, ordem_legumes)
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df_frutas.to_excel(writer, index=False, sheet_name="FRUTAS")
+        df_legumes.to_excel(writer, index=False, sheet_name="LEGUMES")
+
+        wsf = writer.book["FRUTAS"]
+        wsl = writer.book["LEGUMES"]
+
+        ajustar_largura(wsf, [42] + [12] * (len(df_frutas.columns) - 1))
+        ajustar_largura(wsl, [42] + [12] * (len(df_legumes.columns) - 1))
+
+    output.seek(0)
+    return output, df_frutas, df_legumes, lojas_ordenadas
+
+# =========================
+# GERAÇÃO PREÇOS
+# =========================
+def gerar_planilha_precos(pedido_df, modelo_frutas_df, modelo_legumes_df):
+    campos = detectar_campos_pedido(pedido_df)
+
+    if not campos["produto"]:
+        raise ValueError("Não encontrei a coluna de produto no pedido.")
+
+    mapa_frutas, _ = mapear_modelo_por_nome(modelo_frutas_df)
+    mapa_legumes, _ = mapear_modelo_por_nome(modelo_legumes_df)
 
     frutas = {}
     legumes = {}
 
     for _, row in pedido_df.iterrows():
-        produto_original = str(row[col_produto]).strip() if pd.notna(row[col_produto]) else ""
+        produto_original = str(row[campos["produto"]]).strip() if pd.notna(row[campos["produto"]]) else ""
         if not produto_original:
             continue
 
-        loja = row[col_loja]
-        numero_loja = extrair_numero_loja(loja)
-        if numero_loja is None:
-            continue
-
         codigo = ""
-        if col_codigo and pd.notna(row[col_codigo]):
-            codigo = str(row[col_codigo]).strip()
+        if campos["codigo"] and pd.notna(row[campos["codigo"]]):
+            codigo = str(row[campos["codigo"]]).strip()
 
         preco = 0.0
-        if col_preco and pd.notna(row[col_preco]):
-            preco = para_numero(row[col_preco])
+        if campos["preco"] and pd.notna(row[campos["preco"]]):
+            preco = para_numero(row[campos["preco"]])
 
-        categoria = classificar_categoria(produto_original, frutas_modelo, legumes_modelo)
+        categoria = classificar_categoria(produto_original, mapa_frutas, mapa_legumes)
         nome_norm = normalizar_texto(produto_original)
 
         if categoria == "FRUTAS":
-            nome_final = frutas_modelo.get(nome_norm, produto_original)
+            nome_final = mapa_frutas.get(nome_norm, produto_original)
             if nome_final not in frutas:
-                frutas[nome_final] = {"CODIGO": codigo, "PRODUTO": nome_final, "PRECO": preco}
+                frutas[nome_final] = {
+                    "CODIGO": codigo,
+                    "PRODUTO": nome_final,
+                    "PRECO": preco
+                }
             else:
                 if not frutas[nome_final]["CODIGO"] and codigo:
                     frutas[nome_final]["CODIGO"] = codigo
                 if frutas[nome_final]["PRECO"] == 0 and preco:
                     frutas[nome_final]["PRECO"] = preco
         else:
-            nome_final = legumes_modelo.get(nome_norm, produto_original)
+            nome_final = mapa_legumes.get(nome_norm, produto_original)
             if nome_final not in legumes:
-                legumes[nome_final] = {"CODIGO": codigo, "PRODUTO": nome_final, "PRECO": preco}
+                legumes[nome_final] = {
+                    "CODIGO": codigo,
+                    "PRODUTO": nome_final,
+                    "PRECO": preco
+                }
             else:
                 if not legumes[nome_final]["CODIGO"] and codigo:
                     legumes[nome_final]["CODIGO"] = codigo
@@ -141,23 +302,28 @@ def gerar_planilha_precos(pedido_df, modelo_frutas_df, modelo_legumes_df):
     df_frutas = pd.DataFrame(list(frutas.values()))
     df_legumes = pd.DataFrame(list(legumes.values()))
 
-    if not df_frutas.empty:
-        df_frutas = df_frutas.sort_values("PRODUTO")
-    else:
+    if df_frutas.empty:
         df_frutas = pd.DataFrame(columns=["CODIGO", "PRODUTO", "PRECO"])
-
-    if not df_legumes.empty:
-        df_legumes = df_legumes.sort_values("PRODUTO")
     else:
+        df_frutas = df_frutas.sort_values("PRODUTO")
+
+    if df_legumes.empty:
         df_legumes = pd.DataFrame(columns=["CODIGO", "PRODUTO", "PRECO"])
+    else:
+        df_legumes = df_legumes.sort_values("PRODUTO")
 
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df_frutas.to_excel(writer, index=False, sheet_name="FRUTAS")
         df_legumes.to_excel(writer, index=False, sheet_name="LEGUMES")
 
-        for aba in ["FRUTAS", "LEGUMES"]:
-            ws = writer.book[aba]
+        wsf = writer.book["FRUTAS"]
+        wsl = writer.book["LEGUMES"]
+
+        ajustar_largura(wsf, [14, 42, 14])
+        ajustar_largura(wsl, [14, 42, 14])
+
+        for ws in [wsf, wsl]:
             for row in ws.iter_rows(min_row=2):
                 if len(row) >= 3:
                     row[2].number_format = 'R$ #,##0.00'
@@ -165,36 +331,80 @@ def gerar_planilha_precos(pedido_df, modelo_frutas_df, modelo_legumes_df):
     output.seek(0)
     return output, df_frutas, df_legumes
 
+# =========================
+# INTERFACE
+# =========================
 pedido_file = st.file_uploader("Pedido Krill", type=["xlsx", "xls"], key="pedido")
-frutas_file = st.file_uploader("Modelo FRUTAS", type=["xlsx", "xls"], key="frutas")
-legumes_file = st.file_uploader("Modelo LEGUMES", type=["xlsx", "xls"], key="legumes")
 
-if pedido_file and frutas_file and legumes_file:
+if pedido_file:
     try:
+        modelo_frutas_df, modelo_legumes_df = carregar_modelos_fixos()
         pedido_df = pd.read_excel(pedido_file)
-        modelo_frutas_df = pd.read_excel(frutas_file)
-        modelo_legumes_df = pd.read_excel(legumes_file)
 
-        arquivo_precos, df_frutas, df_legumes = gerar_planilha_precos(
+        arquivo_principal, df_frutas_main, df_legumes_main, lojas = gerar_planilhas_principais(
             pedido_df, modelo_frutas_df, modelo_legumes_df
         )
 
-        st.success("Planilha de códigos e preços gerada com sucesso.")
-
-        c1, c2 = st.columns(2)
-        with c1:
-            st.write("FRUTAS")
-            st.dataframe(df_frutas, use_container_width=True)
-        with c2:
-            st.write("LEGUMES")
-            st.dataframe(df_legumes, use_container_width=True)
-
-        st.download_button(
-            "Baixar PREÇOS",
-            data=arquivo_precos,
-            file_name="KRILL_PRECOS.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        arquivo_precos, df_frutas_precos, df_legumes_precos = gerar_planilha_precos(
+            pedido_df, modelo_frutas_df, modelo_legumes_df
         )
+
+        campos = detectar_campos_pedido(pedido_df)
+
+        st.success("Processamento concluído com sucesso.")
+        st.caption(
+            f"Colunas encontradas no pedido → "
+            f"Loja: {campos['loja'] or 'NÃO ENCONTRADA'} | "
+            f"Produto: {campos['produto'] or 'NÃO ENCONTRADA'} | "
+            f"Qtde: {campos['qtd'] or 'NÃO ENCONTRADA'} | "
+            f"Código: {campos['codigo'] or 'NÃO ENCONTRADA'} | "
+            f"Preço: {campos['preco'] or 'NÃO ENCONTRADA'}"
+        )
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Itens FRUTAS", 0 if df_frutas_precos.empty else len(df_frutas_precos))
+        c2.metric("Itens LEGUMES", 0 if df_legumes_precos.empty else len(df_legumes_precos))
+        c3.metric("Lojas processadas", len(lojas))
+        c4.metric("Não encontrados", 0)
+
+        b1, b2, b3 = st.columns(3)
+
+        with b1:
+            st.download_button(
+                "Baixar FRUTAS + LEGUMES",
+                data=arquivo_principal,
+                file_name="KRILL_THOTH_PRINCIPAL.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+
+        with b2:
+            st.download_button(
+                "Baixar PREÇOS",
+                data=arquivo_precos,
+                file_name="KRILL_PRECOS.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+
+        with b3:
+            resumo_output = BytesIO()
+            with pd.ExcelWriter(resumo_output, engine="openpyxl") as writer:
+                df_frutas_precos.to_excel(writer, index=False, sheet_name="PRECOS_FRUTAS")
+                df_legumes_precos.to_excel(writer, index=False, sheet_name="PRECOS_LEGUMES")
+                df_frutas_main.to_excel(writer, index=False, sheet_name="THOTH_FRUTAS")
+                df_legumes_main.to_excel(writer, index=False, sheet_name="THOTH_LEGUMES")
+            resumo_output.seek(0)
+
+            st.download_button(
+                "Baixar TUDO",
+                data=resumo_output,
+                file_name="KRILL_TUDO.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
 
     except Exception as e:
         st.error(f"Erro ao processar: {e}")
+else:
+    st.info("Suba apenas o pedido original da Krill.")
