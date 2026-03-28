@@ -13,7 +13,6 @@ st.set_page_config(page_title="KRILL → THOTH (PRO)", page_icon="📦", layout=
 BASE_DIR = Path(__file__).resolve().parent
 IGNORE_NAMES = {"", "TOTAL", "TOTAIS", "SUBTOTAL", "SUB-TOTAL", "PRODUTO", "PRODUTOS"}
 
-
 def norm_text(v):
     if v is None:
         return ""
@@ -95,18 +94,16 @@ def read_order(file):
     idx_produto = find_idx([["DESCRIÇÃO DO PRODUTO"], ["DESCRICAO DO PRODUTO"], ["PRODUTO"]], avoid_list=["REF", "CODIGO"])
     idx_qtde = find_idx([["QTDE.", "PEDIDA"], ["QTDE", "PEDIDA"], ["QTDE."], ["QTDE"], ["QUANTIDADE"]])
     
+    # 1. Ajustado para focar em "REF FORNECEDOR" (O Código)
     idx_codigo = find_idx([
         ["REF", "FORN"], ["REFERENCIA", "FORN"], ["REFERÊNCIA", "FORN"], 
-        ["REF"], ["REFERENCIA"], ["CODIGO", "FORN"]
+        ["REF"]
     ], avoid_list=["BARRAS", "EAN", "GTIN", "SKU"])
     
+    # 2. Ajustado para focar em "CUSTO" (O Preço)
     idx_preco = find_idx([
-        ["PRECO", "UNIT"], ["PREÇO", "UNIT"], ["VALOR", "UNIT"], ["VLR", "UNIT"],
-        ["CUSTO", "UNIT"], ["CUSTO"], ["PRECO"], ["PREÇO"]
-    ], avoid_list=["TOTAL", "BARRAS", "EAN", "GTIN", "VENDA"])
-    
-    if idx_preco is None:
-        idx_preco = find_idx([["VALOR"], ["VLR"]], avoid_list=["TOTAL", "BARRAS", "EAN", "GTIN", "VENDA"])
+        ["CUSTO", "UN"], ["CUSTO"], ["PRECO", "UNIT"], ["PREÇO", "UNIT"], ["VALOR", "UNIT"]
+    ], avoid_list=["TOTAL", "BARRAS", "EAN", "GTIN", "VENDA", "CX"])
     
     if idx_loja is None or idx_produto is None or idx_qtde is None:
         raise ValueError("Erro fatal: As colunas obrigatórias (Loja, Produto, Qtde) desapareceram.")
@@ -152,7 +149,7 @@ def read_order(file):
         "col_produto": str(row_vals[idx_produto]) if idx_produto is not None else "ERRO",
         "col_qtde": str(row_vals[idx_qtde]) if idx_qtde is not None else "ERRO",
         "col_codigo": str(row_vals[idx_codigo]) if idx_codigo is not None else "NÃO ACHOU COLUNA REF",
-        "col_preco": str(row_vals[idx_preco]) if idx_preco is not None else "NÃO ACHOU COLUNA PREÇO",
+        "col_preco": str(row_vals[idx_preco]) if idx_preco is not None else "NÃO ACHOU COLUNA CUSTO",
     }
     return clean_df, debug_info
 
@@ -200,7 +197,7 @@ def model_map(ws):
 def product_rows(ws):
     rows = {}
     for row in range(3, ws.max_row + 1):
-        prod = norm_text(ws.cell(row, 1).value)
+        prod = norm_text(ws.cell(row, 2).value) # Lendo o produto da Coluna B
         if prod and norm_key(prod) not in IGNORE_NAMES:
             rows[norm_key(prod)] = row
     return rows
@@ -209,18 +206,6 @@ def product_rows(ws):
 def get_cached_product_rows(model_path_str: str):
     wb = load_workbook(model_path_str)
     return product_rows(wb.active)
-
-@st.cache_data
-def get_model_codes(model_path_str: str):
-    wb = load_workbook(model_path_str)
-    ws = wb.active
-    codes = {}
-    for row in range(3, ws.max_row + 1):
-        prod = norm_text(ws.cell(row, 2).value)
-        cod = norm_text(ws.cell(row, 1).value)
-        if prod and norm_key(prod) not in IGNORE_NAMES:
-            codes[norm_key(prod)] = cod
-    return codes
 
 def copy_row_style(ws, src_row, dst_row):
     for col in range(1, ws.max_column + 1):
@@ -234,7 +219,7 @@ def copy_row_style(ws, src_row, dst_row):
         dst.number_format = src.number_format
         dst.protection = copy(src.protection)
 
-# ==== A MÁGICA ACONTECE AQUI ====
+
 def split_by_models(pivot, frutas_rows, legumes_rows):
     frutas_idx, legumes_idx = [], []
     frutas_keys = set(frutas_rows.keys())
@@ -244,7 +229,7 @@ def split_by_models(pivot, frutas_rows, legumes_rows):
         if key in frutas_keys: 
             frutas_idx.append(prod)
         else: 
-            # Se for Legume OU qualquer item NOVO não cadastrado, joga direto na lista de Legumes!
+            # Se não estiver no modelo de FRUTAS, vai para LEGUMES (incluindo as novidades)
             legumes_idx.append(prod)
 
     empty = pivot.iloc[0:0].copy()
@@ -258,38 +243,48 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
     ws = wb.active
     stores, total_col, cd_col = model_map(ws)
     prod_map = product_rows(ws)
+    
     cols_to_clear = list(stores.values())
     if total_col: cols_to_clear.append(total_col)
     if cd_col: cols_to_clear.append(cd_col)
     
+    # 1. Limpa todas as quantidades das lojas
     for row in range(3, ws.max_row + 1):
         if norm_text(ws.cell(row, 2).value):
             for col in cols_to_clear: ws.cell(row, col).value = None
 
     used = set()
+
+    # 2. Preenche quantidades dos itens conhecidos
     for prod in data.index.tolist():
         key = norm_key(prod)
         if key not in prod_map: continue
+        
         row = prod_map[key]
         used.add(key)
         row_total = 0
+        
         for loja in data.columns:
             if loja in stores:
                 val = float(data.loc[prod, loja])
                 if val:
                     ws.cell(row, stores[loja]).value = val
                     row_total += val
+                    
         if total_col: ws.cell(row, total_col).value = row_total if row_total else None
         if cd_col: ws.cell(row, cd_col).value = None
 
+    # 3. Adiciona itens novos ESCREVENDO o nome na Coluna B
     missing = [prod for prod in data.index.tolist() if norm_key(prod) not in used]
     if missing:
         last_filled = max(prod_map.values()) if prod_map else 3
         style_row = last_filled
         current_row = last_filled + 1
+        
         for prod in missing:
             copy_row_style(ws, style_row, current_row)
-            ws.cell(current_row, 2).value = prod
+            ws.cell(current_row, 2).value = prod # Escreve o produto novo
+            
             row_total = 0
             for loja in data.columns:
                 if loja in stores:
@@ -297,20 +292,31 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
                     if val:
                         ws.cell(current_row, stores[loja]).value = val
                         row_total += val
+                        
             if total_col: ws.cell(current_row, total_col).value = row_total if row_total else None
             if cd_col: ws.cell(current_row, cd_col).value = None
             current_row += 1
+
+    # 4. Apaga linhas do modelo que não tiveram pedido
+    max_row = ws.max_row
+    for r in range(max_row, 2, -1):
+        prod_val = norm_text(ws.cell(r, 2).value)
+        if prod_val:
+            key = norm_key(prod_val)
+            if key not in [norm_key(p) for p in data.index.tolist()]:
+                ws.delete_rows(r, 1)
 
     out = BytesIO()
     wb.save(out)
     out.seek(0)
     return out.getvalue()
 
-def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataFrame, frutas_codes: dict, legumes_codes: dict) -> bytes:
-    base_precos = order_df[['Descrição do Produto', 'PrecoPedido']].copy().drop_duplicates(subset=['Descrição do Produto'])
+def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataFrame) -> bytes:
+    # 5. Lendo diretamente o Preço (Custo) e o Código (Ref) do seu pedido original da Krill!
+    base_precos = order_df[['Descrição do Produto', 'CodigoPedido', 'PrecoPedido']].copy().drop_duplicates(subset=['Descrição do Produto'])
     base_precos['PRODUTO_KEY'] = base_precos['Descrição do Produto'].map(norm_key)
 
-    def make_df(df, model_codes):
+    def make_df(df):
         if df.empty:
             return pd.DataFrame(columns=['CODIGO', 'PRODUTO', 'PRECO'])
             
@@ -320,22 +326,29 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataF
             key = norm_key(prod)
             achou = base_precos[base_precos['PRODUTO_KEY'] == key]
             
-            # Puxa o código do modelo. Se for um item novo, ele retorna vazio ("") automaticamente.
-            codigo_interno = model_codes.get(key, "")
-            
             if not achou.empty:
                 row = achou.iloc[0]
+                cod = str(row['CodigoPedido']).strip()
+                
+                # Prepara o código com a aspa simples invisível para o Excel não distorcer
+                if cod and cod.lower() != 'nan' and cod.lower() != 'none':
+                    cod_num = "".join(filter(str.isdigit, cod))
+                    cod_formatado = f"'{cod_num}" if cod_num else ""
+                else:
+                    cod_formatado = ""
+
                 linhas.append({
-                    'CODIGO': codigo_interno, 
+                    'CODIGO': cod_formatado, 
                     'PRODUTO': prod, 
                     'PRECO': row['PrecoPedido']
                 })
             else:
-                linhas.append({'CODIGO': codigo_interno, 'PRODUTO': prod, 'PRECO': ''})
+                linhas.append({'CODIGO': '', 'PRODUTO': prod, 'PRECO': ''})
+                
         return pd.DataFrame(linhas)
 
-    frutas_df = make_df(frutas, frutas_codes)
-    legumes_df = make_df(legumes, legumes_codes)
+    frutas_df = make_df(frutas)
+    legumes_df = make_df(legumes)
     
     out = BytesIO()
     with pd.ExcelWriter(out, engine='openpyxl') as writer:
@@ -351,6 +364,7 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataF
     out.seek(0)
     return out.getvalue()
 
+
 st.title("📦 KRILL → THOTH (PRO)")
 st.caption("Modelos fixos no sistema. Mapeamento por número da loja. KRILL CD sempre vazio.")
 
@@ -358,12 +372,11 @@ with st.sidebar:
     st.subheader("Como usar")
     st.write("1. Envie o pedido bruto da Krill.")
     st.write("2. Clique em Processar.")
-    st.write("3. Baixe FRUTAS, LEGUMES e PREÇOS (Itens novos vão direto para Legumes).")
-    st.info("O sistema busca os modelos automaticamente na raiz do app ou na pasta models.")
-    st.info("A planilha de PREÇOS usa os códigos e preços do próprio pedido atual.")
+    st.write("3. Baixe FRUTAS, LEGUMES e PREÇOS.")
+    st.info("A planilha de PREÇOS lê o Custo Un. e a Ref. Fornecedor direto do pedido da Krill.")
     st.info("Regra: pedido loja X = coluna KRILL X.")
 
-uploaded = st.file_uploader("Pedido Krill", type=["xlsx", "xls"])
+uploaded = st.file_uploader("Pedido Krill", type=["xlsx", "xls", "csv"])
 
 if st.button("PROCESSAR", use_container_width=True, type="primary"):
     if not uploaded:
@@ -377,22 +390,21 @@ if st.button("PROCESSAR", use_container_width=True, type="primary"):
                 st.error(f"Modelo LEGUMES não encontrado: {MODEL_LEGUMES.name}.")
                 st.stop()
 
+            # Lê o seu arquivo original novinho em folha
             order_df, debug_info = read_order(uploaded)
             pivot = build_pivot(order_df)
 
             frutas_rows = get_cached_product_rows(str(MODEL_FRUTAS))
             legumes_rows = get_cached_product_rows(str(MODEL_LEGUMES))
-            
-            frutas_codes = get_model_codes(str(MODEL_FRUTAS))
-            legumes_codes = get_model_codes(str(MODEL_LEGUMES))
 
-            # Separa os itens, jogando as novidades para Legumes
+            # Separa os itens (Novidades como o Tomate vão para Legumes)
             frutas_df, legumes_df = split_by_models(pivot, frutas_rows, legumes_rows)
 
             frutas_file = write_output(MODEL_FRUTAS, frutas_df)
             legumes_file = write_output(MODEL_LEGUMES, legumes_df)
             
-            prices_file = build_prices(frutas_df, legumes_df, order_df, frutas_codes, legumes_codes)
+            # Gera os preços puxando os dados do próprio arquivo submetido
+            prices_file = build_prices(frutas_df, legumes_df, order_df)
 
             st.success("Processamento concluído com sucesso.")
 
