@@ -94,13 +94,11 @@ def read_order(file):
     idx_produto = find_idx([["DESCRIÇÃO DO PRODUTO"], ["DESCRICAO DO PRODUTO"], ["PRODUTO"]], avoid_list=["REF", "CODIGO"])
     idx_qtde = find_idx([["QTDE.", "PEDIDA"], ["QTDE", "PEDIDA"], ["QTDE."], ["QTDE"], ["QUANTIDADE"]])
     
-    # 1. Ajustado para focar em "REF FORNECEDOR" (O Código)
     idx_codigo = find_idx([
         ["REF", "FORN"], ["REFERENCIA", "FORN"], ["REFERÊNCIA", "FORN"], 
         ["REF"]
     ], avoid_list=["BARRAS", "EAN", "GTIN", "SKU"])
     
-    # 2. Ajustado para focar em "CUSTO" (O Preço)
     idx_preco = find_idx([
         ["CUSTO", "UN"], ["CUSTO"], ["PRECO", "UNIT"], ["PREÇO", "UNIT"], ["VALOR", "UNIT"]
     ], avoid_list=["TOTAL", "BARRAS", "EAN", "GTIN", "VENDA", "CX"])
@@ -197,7 +195,8 @@ def model_map(ws):
 def product_rows(ws):
     rows = {}
     for row in range(3, ws.max_row + 1):
-        prod = norm_text(ws.cell(row, 2).value) # Lendo o produto da Coluna B
+        # CORREÇÃO: O produto fica na COLUNA A (1), e não na 2!
+        prod = norm_text(ws.cell(row, 1).value)
         if prod and norm_key(prod) not in IGNORE_NAMES:
             rows[norm_key(prod)] = row
     return rows
@@ -250,7 +249,8 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
     
     # 1. Limpa todas as quantidades das lojas
     for row in range(3, ws.max_row + 1):
-        if norm_text(ws.cell(row, 2).value):
+        # CORREÇÃO: Lendo Coluna A (1)
+        if norm_text(ws.cell(row, 1).value):
             for col in cols_to_clear: ws.cell(row, col).value = None
 
     used = set()
@@ -274,7 +274,7 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
         if total_col: ws.cell(row, total_col).value = row_total if row_total else None
         if cd_col: ws.cell(row, cd_col).value = None
 
-    # 3. Adiciona itens novos ESCREVENDO o nome na Coluna B
+    # 3. Adiciona itens novos ESCREVENDO o nome na Coluna A
     missing = [prod for prod in data.index.tolist() if norm_key(prod) not in used]
     if missing:
         last_filled = max(prod_map.values()) if prod_map else 3
@@ -283,7 +283,8 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
         
         for prod in missing:
             copy_row_style(ws, style_row, current_row)
-            ws.cell(current_row, 2).value = prod # Escreve o produto novo
+            # CORREÇÃO: Escreve o produto novo na Coluna A (1)
+            ws.cell(current_row, 1).value = prod 
             
             row_total = 0
             for loja in data.columns:
@@ -300,9 +301,14 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
     # 4. Apaga linhas do modelo que não tiveram pedido
     max_row = ws.max_row
     for r in range(max_row, 2, -1):
-        prod_val = norm_text(ws.cell(r, 2).value)
+        # CORREÇÃO: Lendo Coluna A (1)
+        prod_val = norm_text(ws.cell(r, 1).value)
         if prod_val:
             key = norm_key(prod_val)
+            # Ignora as linhas de "TOTAL" para não apagá-las
+            if key in IGNORE_NAMES:
+                continue
+                
             if key not in [norm_key(p) for p in data.index.tolist()]:
                 ws.delete_rows(r, 1)
 
@@ -312,7 +318,6 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
     return out.getvalue()
 
 def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataFrame) -> bytes:
-    # 5. Lendo diretamente o Preço (Custo) e o Código (Ref) do seu pedido original da Krill!
     base_precos = order_df[['Descrição do Produto', 'CodigoPedido', 'PrecoPedido']].copy().drop_duplicates(subset=['Descrição do Produto'])
     base_precos['PRODUTO_KEY'] = base_precos['Descrição do Produto'].map(norm_key)
 
