@@ -82,8 +82,6 @@ def read_order(file):
     row_vals = raw.iloc[header_row].tolist()
     norm_row = [norm_key(x) for x in row_vals]
     
-    # ======= BUSCA BLINDADA ========
-    # Agora ele procura a coluna certa, mas foge de palavras proibidas (como EAN e TOTAL)
     def find_idx(keywords_list, avoid_list=[]):
         for keywords in keywords_list:
             for i, val in enumerate(norm_row):
@@ -97,20 +95,17 @@ def read_order(file):
     idx_produto = find_idx([["DESCRIÇÃO DO PRODUTO"], ["DESCRICAO DO PRODUTO"], ["PRODUTO"]], avoid_list=["REF", "CODIGO"])
     idx_qtde = find_idx([["QTDE.", "PEDIDA"], ["QTDE", "PEDIDA"], ["QTDE."], ["QTDE"], ["QUANTIDADE"]])
     
-    # Busca pela "Ref do Fornecedor" (1 a 4 números) - Bloqueia o EAN
     idx_codigo = find_idx([
         ["REF", "FORN"], ["REFERENCIA", "FORN"], ["REFERÊNCIA", "FORN"], 
         ["REF"], ["REFERENCIA"], ["CODIGO", "FORN"]
     ], avoid_list=["BARRAS", "EAN", "GTIN", "SKU"])
     
-    # Busca pelo Preço - Bloqueia TOTAL e EAN
     idx_preco = find_idx([
         ["PRECO", "UNIT"], ["PREÇO", "UNIT"], ["VALOR", "UNIT"], ["VLR", "UNIT"],
         ["CUSTO", "UNIT"], ["CUSTO"], ["PRECO"], ["PREÇO"]
     ], avoid_list=["TOTAL", "BARRAS", "EAN", "GTIN", "VENDA"])
     
     if idx_preco is None:
-        # Tenta só valor caso não ache preço
         idx_preco = find_idx([["VALOR"], ["VLR"]], avoid_list=["TOTAL", "BARRAS", "EAN", "GTIN", "VENDA"])
     
     if idx_loja is None or idx_produto is None or idx_qtde is None:
@@ -215,6 +210,18 @@ def get_cached_product_rows(model_path_str: str):
     wb = load_workbook(model_path_str)
     return product_rows(wb.active)
 
+@st.cache_data
+def get_model_codes(model_path_str: str):
+    wb = load_workbook(model_path_str)
+    ws = wb.active
+    codes = {}
+    for row in range(3, ws.max_row + 1):
+        prod = norm_text(ws.cell(row, 2).value)
+        cod = norm_text(ws.cell(row, 1).value)
+        if prod and norm_key(prod) not in IGNORE_NAMES:
+            codes[norm_key(prod)] = cod
+    return codes
+
 def copy_row_style(ws, src_row, dst_row):
     for col in range(1, ws.max_column + 1):
         src = ws.cell(src_row, col)
@@ -227,21 +234,24 @@ def copy_row_style(ws, src_row, dst_row):
         dst.number_format = src.number_format
         dst.protection = copy(src.protection)
 
+# ==== A MÁGICA ACONTECE AQUI ====
 def split_by_models(pivot, frutas_rows, legumes_rows):
-    frutas_idx, legumes_idx, unknown_idx = [], [], []
+    frutas_idx, legumes_idx = [], []
     frutas_keys = set(frutas_rows.keys())
-    legumes_keys = set(legumes_rows.keys())
+    
     for prod in pivot.index.tolist():
         key = norm_key(prod)
-        if key in frutas_keys: frutas_idx.append(prod)
-        elif key in legumes_keys: legumes_idx.append(prod)
-        else: unknown_idx.append(prod)
+        if key in frutas_keys: 
+            frutas_idx.append(prod)
+        else: 
+            # Se for Legume OU qualquer item NOVO não cadastrado, joga direto na lista de Legumes!
+            legumes_idx.append(prod)
 
     empty = pivot.iloc[0:0].copy()
     frutas = pivot.loc[frutas_idx].copy() if frutas_idx else empty.copy()
     legumes = pivot.loc[legumes_idx].copy() if legumes_idx else empty.copy()
-    unknown = pivot.loc[unknown_idx].copy() if unknown_idx else empty.copy()
-    return frutas, legumes, unknown
+    
+    return frutas, legumes
 
 def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
     wb = load_workbook(str(model_path))
@@ -251,8 +261,9 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
     cols_to_clear = list(stores.values())
     if total_col: cols_to_clear.append(total_col)
     if cd_col: cols_to_clear.append(cd_col)
+    
     for row in range(3, ws.max_row + 1):
-        if norm_text(ws.cell(row, 1).value):
+        if norm_text(ws.cell(row, 2).value):
             for col in cols_to_clear: ws.cell(row, col).value = None
 
     used = set()
@@ -278,7 +289,7 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
         current_row = last_filled + 1
         for prod in missing:
             copy_row_style(ws, style_row, current_row)
-            ws.cell(current_row, 1).value = prod
+            ws.cell(current_row, 2).value = prod
             row_total = 0
             for loja in data.columns:
                 if loja in stores:
@@ -295,11 +306,11 @@ def write_output(model_path: Path, data: pd.DataFrame) -> bytes:
     out.seek(0)
     return out.getvalue()
 
-def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataFrame) -> bytes:
-    base_precos = order_df[['Descrição do Produto', 'CodigoPedido', 'PrecoPedido']].copy().drop_duplicates(subset=['Descrição do Produto'])
+def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataFrame, frutas_codes: dict, legumes_codes: dict) -> bytes:
+    base_precos = order_df[['Descrição do Produto', 'PrecoPedido']].copy().drop_duplicates(subset=['Descrição do Produto'])
     base_precos['PRODUTO_KEY'] = base_precos['Descrição do Produto'].map(norm_key)
 
-    def make_df(df):
+    def make_df(df, model_codes):
         if df.empty:
             return pd.DataFrame(columns=['CODIGO', 'PRODUTO', 'PRECO'])
             
@@ -309,33 +320,22 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataF
             key = norm_key(prod)
             achou = base_precos[base_precos['PRODUTO_KEY'] == key]
             
+            # Puxa o código do modelo. Se for um item novo, ele retorna vazio ("") automaticamente.
+            codigo_interno = model_codes.get(key, "")
+            
             if not achou.empty:
                 row = achou.iloc[0]
-                cod = str(row['CodigoPedido']).strip()
-                
-                # Garante que só pega os números do código, ignorando letras, EAN ou lixo
-                if cod and cod.lower() != 'nan' and cod.lower() != 'none':
-                    cod_num = "".join(filter(str.isdigit, cod))
-                    # Limita a 4 dígitos para ter certeza absoluta que não é um EAN gigante que vazou
-                    if len(cod_num) > 6:
-                        cod_formatado = ""
-                    else:
-                        cod_formatado = f"'{cod_num}" if cod_num else ""
-                else:
-                    cod_formatado = ""
-
                 linhas.append({
-                    'CODIGO': cod_formatado, 
+                    'CODIGO': codigo_interno, 
                     'PRODUTO': prod, 
                     'PRECO': row['PrecoPedido']
                 })
             else:
-                linhas.append({'CODIGO': '', 'PRODUTO': prod, 'PRECO': ''})
-                
+                linhas.append({'CODIGO': codigo_interno, 'PRODUTO': prod, 'PRECO': ''})
         return pd.DataFrame(linhas)
 
-    frutas_df = make_df(frutas)
-    legumes_df = make_df(legumes)
+    frutas_df = make_df(frutas, frutas_codes)
+    legumes_df = make_df(legumes, legumes_codes)
     
     out = BytesIO()
     with pd.ExcelWriter(out, engine='openpyxl') as writer:
@@ -351,17 +351,6 @@ def build_prices(frutas: pd.DataFrame, legumes: pd.DataFrame, order_df: pd.DataF
     out.seek(0)
     return out.getvalue()
 
-def build_unknown(unknown: pd.DataFrame) -> bytes:
-    out = BytesIO()
-    if not unknown.empty:
-        df = pd.DataFrame({"PRODUTO": sorted(unknown.index.tolist(), key=lambda x: norm_key(x))})
-    else:
-        df = pd.DataFrame(columns=["PRODUTO"])
-    with pd.ExcelWriter(out, engine="openpyxl") as writer:
-        df.to_excel(writer, sheet_name="NAO_ENCONTRADOS", index=False)
-    out.seek(0)
-    return out.getvalue()
-
 st.title("📦 KRILL → THOTH (PRO)")
 st.caption("Modelos fixos no sistema. Mapeamento por número da loja. KRILL CD sempre vazio.")
 
@@ -369,7 +358,7 @@ with st.sidebar:
     st.subheader("Como usar")
     st.write("1. Envie o pedido bruto da Krill.")
     st.write("2. Clique em Processar.")
-    st.write("3. Baixe FRUTAS, LEGUMES, PREÇOS e NÃO ENCONTRADOS.")
+    st.write("3. Baixe FRUTAS, LEGUMES e PREÇOS (Itens novos vão direto para Legumes).")
     st.info("O sistema busca os modelos automaticamente na raiz do app ou na pasta models.")
     st.info("A planilha de PREÇOS usa os códigos e preços do próprio pedido atual.")
     st.info("Regra: pedido loja X = coluna KRILL X.")
@@ -393,17 +382,20 @@ if st.button("PROCESSAR", use_container_width=True, type="primary"):
 
             frutas_rows = get_cached_product_rows(str(MODEL_FRUTAS))
             legumes_rows = get_cached_product_rows(str(MODEL_LEGUMES))
+            
+            frutas_codes = get_model_codes(str(MODEL_FRUTAS))
+            legumes_codes = get_model_codes(str(MODEL_LEGUMES))
 
-            frutas_df, legumes_df, unknown_df = split_by_models(pivot, frutas_rows, legumes_rows)
+            # Separa os itens, jogando as novidades para Legumes
+            frutas_df, legumes_df = split_by_models(pivot, frutas_rows, legumes_rows)
 
             frutas_file = write_output(MODEL_FRUTAS, frutas_df)
             legumes_file = write_output(MODEL_LEGUMES, legumes_df)
-            prices_file = build_prices(frutas_df, legumes_df, order_df)
-            unknown_file = build_unknown(unknown_df)
+            
+            prices_file = build_prices(frutas_df, legumes_df, order_df, frutas_codes, legumes_codes)
 
             st.success("Processamento concluído com sucesso.")
 
-            # Isso aqui vai imprimir na tela QUAIS colunas ele pescou. Assim a gente tem certeza absoluta do que ele fez!
             st.caption(
                 f"Colunas encontradas no pedido → "
                 f"Loja: {debug_info['col_loja']} | "
@@ -413,11 +405,10 @@ if st.button("PROCESSAR", use_container_width=True, type="primary"):
                 f"Preço: {debug_info['col_preco']}"
             )
 
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3 = st.columns(3)
             c1.metric("Itens FRUTAS", len(frutas_df.index))
-            c2.metric("Itens LEGUMES", len(legumes_df.index))
+            c2.metric("Itens LEGUMES (Inclui Novos)", len(legumes_df.index))
             c3.metric("Lojas processadas", len(pivot.columns))
-            c4.metric("Não encontrados", len(unknown_df.index))
 
             d1, d2, d3 = st.columns(3)
             with d1:
@@ -426,9 +417,6 @@ if st.button("PROCESSAR", use_container_width=True, type="primary"):
                 st.download_button("Baixar LEGUMES", legumes_file, "KRILL_LEGUMES_Thoth.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
             with d3:
                 st.download_button("Baixar PREÇOS", prices_file, "KRILL_PRECOS.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-
-            if not unknown_df.empty:
-                st.download_button("Baixar NÃO ENCONTRADOS", unknown_file, "KRILL_NAO_ENCONTRADOS.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
         except Exception as e:
             st.error(f"Erro ao processar: {e}")
